@@ -1,4 +1,10 @@
 from model import objectives
+from .avm import (
+    SemanticSlotPool,
+    SlotMaskHead,
+    slot_gallery_embedding,
+    slot_scores,
+)
 from .clip_model import ResidualAttentionBlock, ResidualCrossAttentionBlock, Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
 import numpy as np
 import torch
@@ -22,6 +28,21 @@ class IRRA(nn.Module):
         )
         self.embed_dim = base_cfg['embed_dim']
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
+        self.avm_mode = getattr(args, "avm_mode", "none")
+        self.avm_num_slots = getattr(args, "avm_num_slots", 8)
+
+        if self.avm_mode == "slot":
+            self.slot_pool = SemanticSlotPool(
+                self.embed_dim, self.avm_num_slots
+            )
+            self.avm_mask_head = SlotMaskHead(
+                self.embed_dim, self.avm_num_slots
+            )
+        elif self.avm_mode == "none":
+            self.slot_pool = None
+            self.avm_mask_head = None
+        else:
+            raise ValueError(f"Unsupported AVM mode: {self.avm_mode}")
 
         if 'fta' in args.loss_names:  
             self.num_query = 4
@@ -89,10 +110,25 @@ class IRRA(nn.Module):
 
     def encode_image(self, image):
         image_feats = self.base_model.encode_image(image)
+
+        if self.avm_mode == "slot":
+            aerial_cls = image_feats[:, 0, :].float()
+            aerial_slots = self.slot_pool(
+                image_feats[:, 1:, :]
+            )
+            mask = self.avm_mask_head(aerial_cls)
+            return slot_gallery_embedding(aerial_slots, mask)
+
         return image_feats[:, 0, :].float()
 
     def encode_text(self, text):
         x = self.base_model.encode_text(text)
+
+        if self.avm_mode == "slot":
+            return self.slot_pool(
+                x, valid_mask=text.ne(0)
+            )
+
         return x[torch.arange(x.shape[0]), text.argmax(dim=-1)].float()
     
     def compute_fuzzy_membership(self, A, B):  # compute_fuzzy_membership v3
@@ -145,6 +181,34 @@ class IRRA(nn.Module):
 
         if 'cda' in self.current_task:
             ret.update({'cda_loss': objectives.compute_selective_align_loss(i_feats, g_i_feats, t_feats, batch['pids'], logit_scale)})
+
+        if self.avm_mode == "slot":
+            text_slots = self.slot_pool(
+                text_feats, valid_mask=caption_ids.ne(0)
+            )
+            aerial_slots = self.slot_pool(
+                image_feats[:, 1:, :]
+            )
+            avm_mask = self.avm_mask_head(i_feats)
+            raw_scores_t2i = slot_scores(
+                text_slots=text_slots,
+                aerial_slots=aerial_slots,
+                mask=avm_mask,
+            )
+            avm_ret_loss = objectives.compute_sdm_from_scores(
+                raw_scores_t2i=raw_scores_t2i,
+                pid=batch["pids"],
+                logit_scale=logit_scale,
+            )
+
+            ret.update({
+                "avm_ret_loss":
+                    self.args.avm_loss_weight * avm_ret_loss,
+                "avm_mask_mean":
+                    avm_mask.detach().mean(),
+                "avm_mask_std":
+                    avm_mask.detach().std(unbiased=False),
+            })
 
         if 'fta' in self.current_task:
             B = text_feats.shape[0]

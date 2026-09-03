@@ -5,6 +5,23 @@ import os
 import torch.nn.functional as F
 import logging
 
+from model.avm import batched_slot_dot
+
+
+def compute_retrieval_similarity(qfeats, gfeats):
+    """Compute either global or semantic-slot retrieval scores."""
+    if qfeats.ndim == 2 and gfeats.ndim == 2:
+        qfeats = F.normalize(qfeats, p=2, dim=-1)
+        gfeats = F.normalize(gfeats, p=2, dim=-1)
+        return qfeats @ gfeats.t()
+
+    if qfeats.ndim == 3 and gfeats.ndim == 3:
+        return batched_slot_dot(qfeats, gfeats)
+
+    raise ValueError(
+        "query and gallery features must both be 2-D or both be 3-D"
+    )
+
 
 def rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
     if get_mAP:
@@ -79,10 +96,7 @@ class Evaluator():
 
         
 
-        qfeats = F.normalize(qfeats, p=2, dim=1) # text features
-        gfeats = F.normalize(gfeats, p=2, dim=1) # image features
-
-        similarity = qfeats @ gfeats.t()
+        similarity = compute_retrieval_similarity(qfeats, gfeats)
 
         t2i_cmc, t2i_mAP, t2i_mINP, _ = rank(similarity=similarity, q_pids=qids, g_pids=gids, max_rank=10, get_mAP=True)
         t2i_cmc, t2i_mAP, t2i_mINP = t2i_cmc.numpy(), t2i_mAP.numpy(), t2i_mINP.numpy()

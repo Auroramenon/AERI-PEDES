@@ -35,6 +35,33 @@ def get_args():
     parser.add_argument("--loss_names", default='sdm', help="which loss to use ['mlm', 'cmpm', 'id', 'itc', 'sdm']")
     parser.add_argument("--mlm_loss_weight", type=float, default=1.0, help="mlm loss weight")
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
+
+    ######################## AVM settings ########################
+    parser.add_argument(
+        "--avm_mode",
+        type=str,
+        default="none",
+        choices=["none", "slot"],
+        help="aerial visibility masking mode",
+    )
+    parser.add_argument(
+        "--avm_num_slots",
+        type=int,
+        default=8,
+        help="number of shared semantic slots",
+    )
+    parser.add_argument(
+        "--avm_loss_weight",
+        type=float,
+        default=1.0,
+        help="weight of the AVM slot retrieval loss",
+    )
+    parser.add_argument(
+        "--avm_lr",
+        type=float,
+        default=1e-4,
+        help="learning rate for newly initialized AVM parameters",
+    )
     
     ######################## vison trainsformer settings ########################
     parser.add_argument("--img_size", type=tuple, default=(384, 128))

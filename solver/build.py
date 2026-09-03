@@ -31,6 +31,10 @@ def build_optimizer(args, model):
             lr =  args.lr * args.lr_factor # default 5.0
             # lr = args.lr2
             # lr = args.lr2 * args.lr_factor
+
+        if "slot_pool" in key or "avm_mask_head" in key:
+            # Use the guide learning rate for new AVM parameters.
+            lr = args.avm_lr
         
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
 
