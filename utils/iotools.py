@@ -48,15 +48,15 @@ def check_isfile(path):
 
 
 def read_json(fpath):
-    with open(fpath, 'r') as f:
+    with open(fpath, 'r', encoding='utf-8') as f:
         obj = json.load(f)
     return obj
 
 
 def write_json(obj, fpath):
     mkdir_if_missing(osp.dirname(fpath))
-    with open(fpath, 'w') as f:
-        json.dump(obj, f, indent=4, separators=(',', ': '))
+    with open(fpath, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, indent=4, separators=(',', ': '), ensure_ascii=False)
 
 
 def get_text_embedding(path, length):
@@ -67,10 +67,10 @@ def get_text_embedding(path, length):
 def save_train_configs(path, args):
     if not os.path.exists(path):
         os.makedirs(path)
-    with open(f'{path}/configs.yaml', 'w') as f:
+    with open(f'{path}/configs.yaml', 'w', encoding='utf-8') as f:
         yaml.dump(vars(args), f, default_flow_style=False)
 
 def load_train_configs(path):
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         args = yaml.load(f, Loader=yaml.FullLoader)
     return edict(args)
