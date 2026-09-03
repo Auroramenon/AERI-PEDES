@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Python environments
+.venv/
+venv/
+
+# Experiment outputs
+logs/
+wandb/
+runs/
+outputs/
+checkpoints/
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+
+# Local migration notes
+AVM_*.md
+AVM_*.txt
+
+# Editors
+.vscode/
+.idea/

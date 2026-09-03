@@ -21,7 +21,7 @@ from utils.metrics import Evaluator
 from utils.options import get_args
 from utils.comm import get_rank, synchronize
 # import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+
 
 
 def set_seed(seed=0):
