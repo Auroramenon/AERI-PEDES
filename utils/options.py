@@ -14,6 +14,8 @@ def get_args():
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
 
     parser.add_argument("--finetune", type=str, default="pretrain/HAMbest0.pth")
+    parser.add_argument("--clip_download_root", type=str, default=None,
+                        help="directory for downloading and caching OpenAI CLIP weights")
     parser.add_argument("--pretrain", type=str, default="")
     parser.add_argument("--nam", default=False, action='store_true')
 

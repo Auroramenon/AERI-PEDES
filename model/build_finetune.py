@@ -14,7 +14,12 @@ class IRRA(nn.Module):
         self.num_classes = num_classes
         self._set_task()
 
-        self.base_model, base_cfg = build_CLIP_from_openai_pretrained(args.pretrain_choice, args.img_size, args.stride_size)
+        self.base_model, base_cfg = build_CLIP_from_openai_pretrained(
+            args.pretrain_choice,
+            args.img_size,
+            args.stride_size,
+            download_root=getattr(args, "clip_download_root", None),
+        )
         self.embed_dim = base_cfg['embed_dim']
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
 
