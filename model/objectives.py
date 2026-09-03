@@ -268,6 +268,60 @@ def compute_fa_infonce_loss(S_t2v, S_v2t, logit_scale=0.07):
 
     return loss
 
+def compute_sdm_from_scores(
+    raw_scores_t2i,
+    pid,
+    logit_scale,
+    epsilon=1e-8,
+):
+    """
+    Compute PID-aware bidirectional SDM from a raw similarity matrix.
+
+    Args:
+        raw_scores_t2i: [B, B] unscaled text-to-aerial similarities.
+        pid: [B] identity labels shared by paired text and aerial samples.
+        logit_scale: inverse temperature, applied exactly once here.
+    """
+    if raw_scores_t2i.ndim != 2:
+        raise ValueError(
+            f"raw_scores_t2i must be 2-D, got {raw_scores_t2i.shape}"
+        )
+
+    batch_size = raw_scores_t2i.shape[0]
+    if raw_scores_t2i.shape[1] != batch_size:
+        raise ValueError(
+            "training scores must be square because text and aerial "
+            "samples come from the same paired batch"
+        )
+
+    pid = pid.reshape(batch_size, 1)
+    labels = (pid - pid.t() == 0).float()
+
+    labels_distribute = labels / labels.sum(
+        dim=1, keepdim=True
+    ).clamp_min(1.0)
+
+    # Temperature is applied once, at the SDM loss boundary.
+    logits_t2i = logit_scale * raw_scores_t2i
+    logits_i2t = logit_scale * raw_scores_t2i.t()
+
+    t2i_pred = F.softmax(logits_t2i, dim=1)
+    t2i_loss = t2i_pred * (
+        F.log_softmax(logits_t2i, dim=1)
+        - torch.log(labels_distribute + epsilon)
+    )
+
+    i2t_pred = F.softmax(logits_i2t, dim=1)
+    i2t_loss = i2t_pred * (
+        F.log_softmax(logits_i2t, dim=1)
+        - torch.log(labels_distribute + epsilon)
+    )
+
+    return (
+        torch.mean(torch.sum(t2i_loss, dim=1))
+        + torch.mean(torch.sum(i2t_loss, dim=1))
+    )
+
 def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, factor=0.3, epsilon=1e-8):
     """
     Similarity Distribution Matching

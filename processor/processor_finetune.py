@@ -33,6 +33,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "loss": AverageMeter(),
         "cda_loss": AverageMeter(),
         "fta_loss": AverageMeter(),
+        "avm_ret_loss": AverageMeter(),
+        "avm_mask_mean": AverageMeter(),
+        "avm_mask_std": AverageMeter(),
         "entropy_loss": AverageMeter(),
         "fa_triplet_loss": AverageMeter(),
         "itc_loss": AverageMeter(),
@@ -66,7 +69,13 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             meters['loss'].update(total_loss.item(), batch_size)
             meters['cda_loss'].update(ret.get('cda_loss', 0), batch_size)
             meters['fta_loss'].update(ret.get('fta_loss', 0), batch_size)
-
+            meters['avm_ret_loss'].update(ret.get('avm_ret_loss', 0), batch_size)
+            meters['avm_mask_mean'].update(
+                ret.get('avm_mask_mean', 0), batch_size
+            )
+            meters['avm_mask_std'].update(
+                ret.get('avm_mask_std', 0), batch_size
+            )
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()

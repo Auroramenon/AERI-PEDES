@@ -32,6 +32,10 @@ def build_optimizer(args, model):
             # lr = args.lr2
             # lr = args.lr2 * args.lr_factor
         
+        if "avm_mask_head" in key:
+            # New AVM parameters use the learning rate specified by the guide.
+            lr = args.avm_lr
+
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
 
     if args.optimizer == "SGD":

@@ -1,4 +1,5 @@
 from model import objectives
+from .avm import FeatureMaskHead, feature_gallery_embedding, feature_scores
 from .clip_model import ResidualAttentionBlock, ResidualCrossAttentionBlock, Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
 import numpy as np
 import torch
@@ -22,6 +23,14 @@ class IRRA(nn.Module):
         )
         self.embed_dim = base_cfg['embed_dim']
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
+        self.avm_mode = getattr(args, "avm_mode", "none")
+
+        if self.avm_mode == "feature":
+            self.avm_mask_head = FeatureMaskHead(self.embed_dim)
+        elif self.avm_mode == "none":
+            self.avm_mask_head = None
+        else:
+            raise ValueError(f"Unsupported AVM mode: {self.avm_mode}")
 
         if 'fta' in args.loss_names:  
             self.num_query = 4
@@ -89,7 +98,13 @@ class IRRA(nn.Module):
 
     def encode_image(self, image):
         image_feats = self.base_model.encode_image(image)
-        return image_feats[:, 0, :].float()
+        aerial_cls = image_feats[:, 0, :].float()
+
+        if self.avm_mode == "feature":
+            mask = self.avm_mask_head(aerial_cls)
+            return feature_gallery_embedding(aerial_cls, mask)
+
+        return aerial_cls
 
     def encode_text(self, text):
         x = self.base_model.encode_text(text)
@@ -145,6 +160,28 @@ class IRRA(nn.Module):
 
         if 'cda' in self.current_task:
             ret.update({'cda_loss': objectives.compute_selective_align_loss(i_feats, g_i_feats, t_feats, batch['pids'], logit_scale)})
+
+        if self.avm_mode == "feature":
+            avm_mask = self.avm_mask_head(i_feats)
+            raw_scores_t2i = feature_scores(
+                text_cls=t_feats,
+                aerial_cls=i_feats,
+                mask=avm_mask,
+            )
+            avm_ret_loss = objectives.compute_sdm_from_scores(
+                raw_scores_t2i=raw_scores_t2i,
+                pid=batch["pids"],
+                logit_scale=logit_scale,
+            )
+
+            ret.update({
+                "avm_ret_loss":
+                    self.args.avm_loss_weight * avm_ret_loss,
+                "avm_mask_mean":
+                    avm_mask.detach().mean(),
+                "avm_mask_std":
+                    avm_mask.detach().std(unbiased=False),
+            })
 
         if 'fta' in self.current_task:
             B = text_feats.shape[0]
