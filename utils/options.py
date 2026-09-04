@@ -60,13 +60,20 @@ def get_args():
         help="weight of the AVM/SMCA retrieval loss",
     )
     parser.add_argument(
+        "--avm_div_loss_weight",
+        type=float,
+        default=0.0,
+        help="weight of image-side mask-feature decorrelation",
+    )
+    parser.add_argument(
         "--avm_mask_policy",
         type=str,
         default="learned",
-        choices=["learned", "ones"],
+        choices=["learned", "ones", "none"],
         help=(
             "slot mask policy: learned predicts an aerial-conditioned "
-            "mask; ones disables learned masking"
+            "mask; ones disables learned masking; none is required "
+            "for slot_cross"
         ),
     )
     parser.add_argument(

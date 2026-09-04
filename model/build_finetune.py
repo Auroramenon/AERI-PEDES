@@ -32,13 +32,32 @@ class IRRA(nn.Module):
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
         self.avm_mode = getattr(args, "avm_mode", "none")
         self.avm_num_slots = getattr(args, "avm_num_slots", 8)
+        self.avm_div_loss_weight = getattr(
+            args, "avm_div_loss_weight", 0.0
+        )
         self.avm_mask_policy = getattr(
             args, "avm_mask_policy", "learned"
         )
 
-        if self.avm_mask_policy not in {"learned", "ones"}:
+        if self.avm_div_loss_weight < 0:
             raise ValueError(
-                "avm_mask_policy must be 'learned' or 'ones'"
+                "avm_div_loss_weight must be non-negative"
+            )
+
+        if self.avm_mask_policy not in {"learned", "ones", "none"}:
+            raise ValueError(
+                "avm_mask_policy must be 'learned', 'ones', or 'none'"
+            )
+        if (
+            self.avm_mode == "slot_cross"
+            and self.avm_mask_policy != "none"
+        ):
+            raise ValueError(
+                "slot_cross requires avm_mask_policy='none'"
+            )
+        if self.avm_mode == "slot" and self.avm_mask_policy == "none":
+            raise ValueError(
+                "slot mode requires a learned or all-one mask policy"
             )
 
         self.smca_cross_attn = None
@@ -258,6 +277,19 @@ class IRRA(nn.Module):
                 image_feats[:, 1:, :],
                 return_attention=True,
             )
+
+            if self.avm_div_loss_weight > 0:
+                smca_div_raw = (
+                    objectives.compute_slot_decorrelation_loss(
+                        mask_features
+                    )
+                )
+                ret.update({
+                    "smca_div_loss":
+                        self.avm_div_loss_weight * smca_div_raw,
+                    "smca_div_raw": smca_div_raw.detach(),
+                })
+
             enhanced_i_feats, attention_weights = self.smca_cross_attn(
                 image_cls=i_feats,
                 mask_features=mask_features,

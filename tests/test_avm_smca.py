@@ -132,6 +132,7 @@ class SMCAIntegrationTest(unittest.TestCase):
             temperature=0.02,
             avm_mode="slot_cross",
             avm_num_slots=4,
+            avm_mask_policy="none",
             avm_loss_weight=1.0,
         )
 

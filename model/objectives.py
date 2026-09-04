@@ -322,6 +322,33 @@ def compute_sdm_from_scores(
         + torch.mean(torch.sum(i2t_loss, dim=1))
     )
 
+
+def compute_slot_decorrelation_loss(slots, eps=1e-6):
+    """Penalize squared cosine similarity between different slots."""
+    if slots.ndim != 3:
+        raise ValueError(
+            f"slots must have shape [B, K, D], got {slots.shape}"
+        )
+
+    num_slots = slots.shape[1]
+    if num_slots < 2:
+        return slots.float().sum() * 0.0
+
+    unit_slots = F.normalize(
+        slots.float(), p=2, dim=-1, eps=eps
+    )
+    gram = torch.bmm(
+        unit_slots, unit_slots.transpose(1, 2)
+    )
+    off_diagonal = ~torch.eye(
+        num_slots,
+        device=slots.device,
+        dtype=torch.bool,
+    )
+
+    # Squaring prevents positive and negative correlations from cancelling.
+    return gram[:, off_diagonal].pow(2).mean()
+
 def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, factor=0.3, epsilon=1e-8):
     """
     Similarity Distribution Matching
