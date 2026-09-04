@@ -32,12 +32,15 @@ class SemanticSlotPool(nn.Module):
         tokens,
         valid_mask=None,
         return_attention=False,
+        detach_attention=True,
     ):
         """
         Args:
             tokens: token or patch features with shape [B, L, D].
             valid_mask: optional valid-token mask with shape [B, L].
-            return_attention: whether to return detached slot-to-token weights.
+            return_attention: whether to return slot-to-token weights.
+            detach_attention: detach returned weights when they are used only
+                for diagnostics; disable this for an attention-map loss.
 
         Returns:
             Semantic slots with shape [B, K, D]. If requested, also returns
@@ -82,8 +85,10 @@ class SemanticSlotPool(nn.Module):
         attention = F.softmax(attention_logits, dim=-1)
         slots = torch.einsum("bkl,bld->bkd", attention, tokens)
         if return_attention:
-            # Diagnostics must not introduce an auxiliary gradient path.
-            return slots, attention.detach()
+            if detach_attention:
+                # Diagnostics must not introduce an auxiliary gradient path.
+                attention = attention.detach()
+            return slots, attention
         return slots
 
 

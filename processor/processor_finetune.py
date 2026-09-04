@@ -39,6 +39,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "smca_sdm_loss": AverageMeter(),
         "smca_div_loss": AverageMeter(),
         "smca_div_raw": AverageMeter(),
+        "smca_attn_div_loss": AverageMeter(),
+        "smca_attn_div_raw": AverageMeter(),
         "smca_feature_abs_cosine": AverageMeter(),
         "smca_slot_attention_abs_cosine": AverageMeter(),
         "smca_slot_attention_entropy": AverageMeter(),
@@ -94,6 +96,12 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             )
             meters['smca_div_raw'].update(
                 ret.get('smca_div_raw', 0), batch_size
+            )
+            meters['smca_attn_div_loss'].update(
+                ret.get('smca_attn_div_loss', 0), batch_size
+            )
+            meters['smca_attn_div_raw'].update(
+                ret.get('smca_attn_div_raw', 0), batch_size
             )
             meters['smca_feature_abs_cosine'].update(
                 ret.get('smca_feature_abs_cosine', 0), batch_size

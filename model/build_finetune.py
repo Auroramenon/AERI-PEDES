@@ -35,6 +35,9 @@ class IRRA(nn.Module):
         self.avm_div_loss_weight = getattr(
             args, "avm_div_loss_weight", 0.0
         )
+        self.avm_attn_div_loss_weight = getattr(
+            args, "avm_attn_div_loss_weight", 0.0
+        )
         self.avm_mask_policy = getattr(
             args, "avm_mask_policy", "learned"
         )
@@ -42,6 +45,10 @@ class IRRA(nn.Module):
         if self.avm_div_loss_weight < 0:
             raise ValueError(
                 "avm_div_loss_weight must be non-negative"
+            )
+        if self.avm_attn_div_loss_weight < 0:
+            raise ValueError(
+                "avm_attn_div_loss_weight must be non-negative"
             )
 
         if self.avm_mask_policy not in {"learned", "ones", "none"}:
@@ -276,6 +283,9 @@ class IRRA(nn.Module):
             mask_features, slot_attention = self.slot_pool(
                 image_feats[:, 1:, :],
                 return_attention=True,
+                detach_attention=(
+                    self.avm_attn_div_loss_weight == 0
+                ),
             )
 
             if self.avm_div_loss_weight > 0:
@@ -288,6 +298,20 @@ class IRRA(nn.Module):
                     "smca_div_loss":
                         self.avm_div_loss_weight * smca_div_raw,
                     "smca_div_raw": smca_div_raw.detach(),
+                })
+
+            if self.avm_attn_div_loss_weight > 0:
+                smca_attn_div_raw = (
+                    objectives.compute_attention_map_decorrelation_loss(
+                        slot_attention
+                    )
+                )
+                ret.update({
+                    "smca_attn_div_loss":
+                        self.avm_attn_div_loss_weight
+                        * smca_attn_div_raw,
+                    "smca_attn_div_raw":
+                        smca_attn_div_raw.detach(),
                 })
 
             enhanced_i_feats, attention_weights = self.smca_cross_attn(

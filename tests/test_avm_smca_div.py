@@ -68,6 +68,50 @@ class SlotDecorrelationLossTest(unittest.TestCase):
         ))
 
 
+class SlotAttentionDecorrelationLossTest(unittest.TestCase):
+
+    def test_identical_attention_maps_have_unit_penalty(self):
+        attention = torch.full((2, 4, 5), 0.2)
+
+        loss = objectives.compute_attention_map_decorrelation_loss(
+            attention
+        )
+
+        self.assertAlmostEqual(loss.item(), 1.0, places=6)
+
+    def test_disjoint_attention_maps_have_zero_penalty(self):
+        attention = torch.eye(4).unsqueeze(0)
+
+        loss = objectives.compute_attention_map_decorrelation_loss(
+            attention
+        )
+
+        self.assertAlmostEqual(loss.item(), 0.0, places=7)
+
+    def test_loss_reaches_slot_queries_through_live_attention(self):
+        from model.avm import SemanticSlotPool
+
+        pool = SemanticSlotPool(embed_dim=8, num_slots=4)
+        tokens = torch.randn(3, 5, 8)
+        _, attention = pool(
+            tokens,
+            return_attention=True,
+            detach_attention=False,
+        )
+
+        loss = objectives.compute_attention_map_decorrelation_loss(
+            attention
+        )
+        loss.backward()
+
+        self.assertTrue(attention.requires_grad)
+        self.assertIsNotNone(pool.slot_queries.grad)
+        self.assertTrue(torch.isfinite(pool.slot_queries.grad).all())
+        self.assertGreater(
+            pool.slot_queries.grad.abs().sum().item(), 0.0
+        )
+
+
 class SMCADecorrelationIntegrationTest(unittest.TestCase):
 
     def setUp(self):
@@ -87,7 +131,7 @@ class SMCADecorrelationIntegrationTest(unittest.TestCase):
             "pids": torch.arange(4),
         }
 
-    def build_model(self, div_weight):
+    def build_model(self, div_weight, attn_div_weight=0.0):
         dummy_base = DummyBaseModel(self.text_feats)
         args = SimpleNamespace(
             loss_names="cda",
@@ -100,6 +144,7 @@ class SMCADecorrelationIntegrationTest(unittest.TestCase):
             avm_mask_policy="none",
             avm_loss_weight=1.0,
             avm_div_loss_weight=div_weight,
+            avm_attn_div_loss_weight=attn_div_weight,
         )
 
         with patch(
@@ -121,6 +166,8 @@ class SMCADecorrelationIntegrationTest(unittest.TestCase):
 
         self.assertNotIn("smca_div_loss", ret)
         self.assertNotIn("smca_div_raw", ret)
+        self.assertNotIn("smca_attn_div_loss", ret)
+        self.assertNotIn("smca_attn_div_raw", ret)
 
     def test_positive_weight_adds_one_weighted_loss(self):
         model = self.build_model(div_weight=0.1)
@@ -143,11 +190,44 @@ class SMCADecorrelationIntegrationTest(unittest.TestCase):
         self.assertGreater(slot_grad.abs().sum().item(), 0.0)
         self.assertIsNone(cross_grad)
 
+    def test_attention_weight_adds_weighted_loss(self):
+        model = self.build_model(
+            div_weight=0.1,
+            attn_div_weight=0.1,
+        )
+        ret = self.run_forward(model)
+
+        self.assertIn("smca_attn_div_loss", ret)
+        self.assertIn("smca_attn_div_raw", ret)
+        self.assertTrue(torch.allclose(
+            ret["smca_attn_div_loss"],
+            0.1 * ret["smca_attn_div_raw"],
+            atol=1e-6,
+        ))
+
+        ret["smca_attn_div_loss"].backward()
+        slot_grad = model.slot_pool.slot_queries.grad
+        cross_grad = model.smca_cross_attn.cross_attn.in_proj_weight.grad
+
+        self.assertIsNotNone(slot_grad)
+        self.assertTrue(torch.isfinite(slot_grad).all())
+        self.assertGreater(slot_grad.abs().sum().item(), 0.0)
+        self.assertIsNone(cross_grad)
+
     def test_negative_weight_is_rejected(self):
         with self.assertRaisesRegex(
             ValueError, "avm_div_loss_weight"
         ):
             self.build_model(div_weight=-0.1)
+
+    def test_negative_attention_weight_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, "avm_attn_div_loss_weight"
+        ):
+            self.build_model(
+                div_weight=0.1,
+                attn_div_weight=-0.1,
+            )
 
 
 if __name__ == "__main__":

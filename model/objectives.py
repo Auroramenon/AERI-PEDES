@@ -323,31 +323,47 @@ def compute_sdm_from_scores(
     )
 
 
-def compute_slot_decorrelation_loss(slots, eps=1e-6):
-    """Penalize squared cosine similarity between different slots."""
-    if slots.ndim != 3:
-        raise ValueError(
-            f"slots must have shape [B, K, D], got {slots.shape}"
-        )
+def _compute_batched_decorrelation_loss(features, eps):
+    """Return the off-diagonal squared-cosine Gram penalty."""
+    num_features = features.shape[1]
+    if num_features < 2:
+        return features.float().sum() * 0.0
 
-    num_slots = slots.shape[1]
-    if num_slots < 2:
-        return slots.float().sum() * 0.0
-
-    unit_slots = F.normalize(
-        slots.float(), p=2, dim=-1, eps=eps
+    unit_features = F.normalize(
+        features.float(), p=2, dim=-1, eps=eps
     )
     gram = torch.bmm(
-        unit_slots, unit_slots.transpose(1, 2)
+        unit_features, unit_features.transpose(1, 2)
     )
     off_diagonal = ~torch.eye(
-        num_slots,
-        device=slots.device,
+        num_features,
+        device=features.device,
         dtype=torch.bool,
     )
 
     # Squaring prevents positive and negative correlations from cancelling.
     return gram[:, off_diagonal].pow(2).mean()
+
+
+def compute_slot_decorrelation_loss(slots, eps=1e-6):
+    """Penalize squared cosine similarity between mask features."""
+    if slots.ndim != 3:
+        raise ValueError(
+            f"slots must have shape [B, K, D], got {slots.shape}"
+        )
+
+    return _compute_batched_decorrelation_loss(slots, eps)
+
+
+def compute_attention_map_decorrelation_loss(attention, eps=1e-6):
+    """Penalize overlap between different Slot-to-Patch attention maps."""
+    if attention.ndim != 3:
+        raise ValueError(
+            "attention must have shape [B, K, N], "
+            f"got {attention.shape}"
+        )
+
+    return _compute_batched_decorrelation_loss(attention, eps)
 
 def compute_sdm(image_fetures, text_fetures, pid, logit_scale, image_id=None, factor=0.3, epsilon=1e-8):
     """

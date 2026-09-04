@@ -66,6 +66,12 @@ def get_args():
         help="weight of image-side mask-feature decorrelation",
     )
     parser.add_argument(
+        "--avm_attn_div_loss_weight",
+        type=float,
+        default=0.0,
+        help="weight of Slot-to-Patch attention-map decorrelation",
+    )
+    parser.add_argument(
         "--avm_mask_policy",
         type=str,
         default="learned",
