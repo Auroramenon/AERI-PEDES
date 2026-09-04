@@ -2,6 +2,7 @@ from model import objectives
 from .avm import (
     SemanticSlotPool,
     SlotMaskHead,
+    ground_aerial_slot_target,
     slot_gallery_embedding,
     slot_scores,
 )
@@ -30,6 +31,15 @@ class IRRA(nn.Module):
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
         self.avm_mode = getattr(args, "avm_mode", "none")
         self.avm_num_slots = getattr(args, "avm_num_slots", 8)
+        self.avm_supervision = getattr(
+            args, "avm_supervision", "none"
+        )
+        self.avm_qk_temperature = getattr(
+            args, "avm_qk_temperature", None
+        )
+        self.avm_mask_loss_weight = getattr(
+            args, "avm_mask_loss_weight", 0.0
+        )
 
         if self.avm_mode == "slot":
             self.slot_pool = SemanticSlotPool(
@@ -43,6 +53,33 @@ class IRRA(nn.Module):
             self.avm_mask_head = None
         else:
             raise ValueError(f"Unsupported AVM mode: {self.avm_mode}")
+
+        if self.avm_supervision not in ("none", "qk"):
+            raise ValueError(
+                "avm_supervision must be either 'none' or 'qk'"
+            )
+        if self.avm_mask_loss_weight < 0:
+            raise ValueError(
+                "avm_mask_loss_weight must be non-negative"
+            )
+        if self.avm_supervision == "qk":
+            if self.avm_mode != "slot":
+                raise ValueError(
+                    "q_k supervision requires avm_mode='slot'"
+                )
+            if (
+                self.avm_qk_temperature is None
+                or self.avm_qk_temperature <= 0
+            ):
+                raise ValueError(
+                    "q_k supervision requires a positive "
+                    "avm_qk_temperature"
+                )
+        elif self.avm_mask_loss_weight != 0:
+            raise ValueError(
+                "non-zero avm_mask_loss_weight requires "
+                "avm_supervision='qk'"
+            )
 
         if 'fta' in args.loss_names:  
             self.num_query = 4
@@ -209,6 +246,33 @@ class IRRA(nn.Module):
                 "avm_mask_std":
                     avm_mask.detach().std(unbiased=False),
             })
+
+            if self.avm_supervision == "qk":
+                if ground_image_feats is None:
+                    raise RuntimeError(
+                        "q_k supervision requires paired ground images"
+                    )
+
+                ground_slots = self.slot_pool(
+                    ground_image_feats[:, 1:, :]
+                )
+                q_target = ground_aerial_slot_target(
+                    ground_slots=ground_slots,
+                    aerial_slots=aerial_slots,
+                    temperature=self.avm_qk_temperature,
+                )
+                mask_bce = F.binary_cross_entropy(
+                    avm_mask, q_target
+                )
+
+                ret.update({
+                    "avm_mask_loss":
+                        self.avm_mask_loss_weight * mask_bce,
+                    "avm_mask_bce": mask_bce.detach(),
+                    "avm_q_mean": q_target.mean(),
+                    "avm_q_std":
+                        q_target.std(unbiased=False),
+                })
 
         if 'fta' in self.current_task:
             B = text_feats.shape[0]

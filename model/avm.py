@@ -100,6 +100,27 @@ class SlotMaskHead(nn.Module):
         return torch.sigmoid(self.mlp(aerial_cls.float()))
 
 
+def ground_aerial_slot_target(
+    ground_slots, aerial_slots, temperature
+):
+    """Build the detached ground-aerial slot agreement target q_k."""
+    if ground_slots.ndim != 3 or aerial_slots.ndim != 3:
+        raise ValueError(
+            "ground and aerial slots must have shape [B, K, D]"
+        )
+    if ground_slots.shape != aerial_slots.shape:
+        raise ValueError(
+            "ground and aerial slots must have identical shapes"
+        )
+    if temperature is None or temperature <= 0:
+        raise ValueError("q_k temperature must be positive")
+
+    agreement = F.cosine_similarity(
+        ground_slots.float(), aerial_slots.float(), dim=-1
+    )
+    return torch.sigmoid(agreement / temperature).detach()
+
+
 def slot_gallery_embedding(aerial_slots, mask, eps=1e-6):
     """Create the query-independent masked aerial gallery slots."""
     if aerial_slots.ndim != 3:

@@ -57,6 +57,25 @@ def get_args():
         help="weight of the AVM slot retrieval loss",
     )
     parser.add_argument(
+        "--avm_supervision",
+        type=str,
+        default="none",
+        choices=["none", "qk"],
+        help="optional supervision for the aerial slot mask",
+    )
+    parser.add_argument(
+        "--avm_qk_temperature",
+        type=float,
+        default=None,
+        help="tau_v for the detached ground-aerial q_k target",
+    )
+    parser.add_argument(
+        "--avm_mask_loss_weight",
+        type=float,
+        default=0.0,
+        help="lambda_mask for q_k binary cross-entropy",
+    )
+    parser.add_argument(
         "--avm_lr",
         type=float,
         default=1e-4,

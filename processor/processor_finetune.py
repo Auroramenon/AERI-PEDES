@@ -34,8 +34,12 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "cda_loss": AverageMeter(),
         "fta_loss": AverageMeter(),
         "avm_ret_loss": AverageMeter(),
+        "avm_mask_loss": AverageMeter(),
+        "avm_mask_bce": AverageMeter(),
         "avm_mask_mean": AverageMeter(),
         "avm_mask_std": AverageMeter(),
+        "avm_q_mean": AverageMeter(),
+        "avm_q_std": AverageMeter(),
         "entropy_loss": AverageMeter(),
         "fa_triplet_loss": AverageMeter(),
         "itc_loss": AverageMeter(),
@@ -72,11 +76,23 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             meters['avm_ret_loss'].update(
                 ret.get('avm_ret_loss', 0), batch_size
             )
+            meters['avm_mask_loss'].update(
+                ret.get('avm_mask_loss', 0), batch_size
+            )
+            meters['avm_mask_bce'].update(
+                ret.get('avm_mask_bce', 0), batch_size
+            )
             meters['avm_mask_mean'].update(
                 ret.get('avm_mask_mean', 0), batch_size
             )
             meters['avm_mask_std'].update(
                 ret.get('avm_mask_std', 0), batch_size
+            )
+            meters['avm_q_mean'].update(
+                ret.get('avm_q_mean', 0), batch_size
+            )
+            meters['avm_q_std'].update(
+                ret.get('avm_q_std', 0), batch_size
             )
 
             optimizer.zero_grad()
