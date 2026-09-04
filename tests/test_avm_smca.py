@@ -6,7 +6,10 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
-from model.avm import CLS2MaskFeatureCrossAttention
+from model.avm import (
+    CLS2MaskFeatureCrossAttention,
+    SemanticSlotPool,
+)
 from model.build_finetune import IRRA
 from solver.build import build_optimizer
 from utils.metrics import compute_retrieval_similarity
@@ -93,6 +96,27 @@ class CLS2MaskFeatureCrossAttentionTest(unittest.TestCase):
             module(torch.randn(3, 8), torch.randn(2, 4, 8))
 
 
+class SlotAttentionDiagnosticsTest(unittest.TestCase):
+
+    def test_slot_pool_optionally_returns_detached_attention(self):
+        pool = SemanticSlotPool(embed_dim=8, num_slots=4)
+        tokens = torch.randn(3, 5, 8, requires_grad=True)
+
+        mask_features, slot_attention = pool(
+            tokens,
+            return_attention=True,
+        )
+
+        self.assertEqual(mask_features.shape, (3, 4, 8))
+        self.assertEqual(slot_attention.shape, (3, 4, 5))
+        self.assertFalse(slot_attention.requires_grad)
+        self.assertTrue(torch.allclose(
+            slot_attention.sum(dim=-1),
+            torch.ones(3, 4),
+            atol=1e-6,
+        ))
+
+
 class SMCAIntegrationTest(unittest.TestCase):
 
     def setUp(self):
@@ -145,7 +169,9 @@ class SMCAIntegrationTest(unittest.TestCase):
                 "cda_loss",
                 "smca_sdm_loss",
                 "smca_feature_abs_cosine",
-                "smca_attention_entropy",
+                "smca_slot_attention_abs_cosine",
+                "smca_slot_attention_entropy",
+                "smca_cls_attention_entropy",
                 "smca_delta_ratio",
             },
         )

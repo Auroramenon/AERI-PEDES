@@ -27,14 +27,21 @@ class SemanticSlotPool(nn.Module):
         nn.init.normal_(self.slot_queries, mean=0.0, std=1.0)
         self.scale = 1.0 / math.sqrt(embed_dim)
 
-    def forward(self, tokens, valid_mask=None):
+    def forward(
+        self,
+        tokens,
+        valid_mask=None,
+        return_attention=False,
+    ):
         """
         Args:
             tokens: token or patch features with shape [B, L, D].
             valid_mask: optional valid-token mask with shape [B, L].
+            return_attention: whether to return detached slot-to-token weights.
 
         Returns:
-            Semantic slots with shape [B, K, D].
+            Semantic slots with shape [B, K, D]. If requested, also returns
+            detached attention weights with shape [B, K, L].
         """
         if tokens.ndim != 3:
             raise ValueError(
@@ -73,7 +80,11 @@ class SemanticSlotPool(nn.Module):
             )
 
         attention = F.softmax(attention_logits, dim=-1)
-        return torch.einsum("bkl,bld->bkd", attention, tokens)
+        slots = torch.einsum("bkl,bld->bkd", attention, tokens)
+        if return_attention:
+            # Diagnostics must not introduce an auxiliary gradient path.
+            return slots, attention.detach()
+        return slots
 
 
 class CLS2MaskFeatureCrossAttention(nn.Module):
@@ -172,6 +183,7 @@ def smca_diagnostics(
     image_cls,
     enhanced_cls,
     mask_features,
+    slot_attention,
     attention_weights,
     eps=1e-8,
 ):
@@ -181,6 +193,14 @@ def smca_diagnostics(
     if attention_weights.ndim != 4:
         raise ValueError(
             "attention_weights must have shape [B, H, 1, K]"
+        )
+    if slot_attention.ndim != 3:
+        raise ValueError(
+            "slot_attention must have shape [B, K, L]"
+        )
+    if slot_attention.shape[:2] != mask_features.shape[:2]:
+        raise ValueError(
+            "slot_attention must match mask feature dimensions [B, K]"
         )
 
     num_features = mask_features.shape[1]
@@ -202,16 +222,47 @@ def smca_diagnostics(
     else:
         feature_abs_cosine = feature_similarity.new_zeros(())
 
-    attention = attention_weights.float().mean(dim=1).squeeze(1)
-    attention = attention / attention.sum(
+    cls_attention = attention_weights.float().mean(dim=1).squeeze(1)
+    cls_attention = cls_attention / cls_attention.sum(
         dim=-1, keepdim=True
     ).clamp_min(eps)
-    attention_entropy = -(
-        attention * torch.log(attention.clamp_min(eps))
+    cls_attention_entropy = -(
+        cls_attention * torch.log(cls_attention.clamp_min(eps))
     ).sum(dim=-1)
     if num_features > 1:
-        attention_entropy = attention_entropy / math.log(num_features)
-    attention_entropy = attention_entropy.mean()
+        cls_attention_entropy = (
+            cls_attention_entropy / math.log(num_features)
+        )
+    cls_attention_entropy = cls_attention_entropy.mean()
+
+    slot_attention = slot_attention.float()
+    slot_attention_unit = F.normalize(
+        slot_attention, p=2, dim=-1, eps=eps
+    )
+    slot_attention_similarity = torch.einsum(
+        "bkl,bjl->bkj",
+        slot_attention_unit,
+        slot_attention_unit,
+    )
+    if num_features > 1:
+        slot_attention_abs_cosine = slot_attention_similarity[
+            :, off_diagonal
+        ].abs().mean()
+    else:
+        slot_attention_abs_cosine = (
+            slot_attention_similarity.new_zeros(())
+        )
+
+    num_tokens = slot_attention.shape[-1]
+    slot_attention_entropy = -(
+        slot_attention
+        * torch.log(slot_attention.clamp_min(eps))
+    ).sum(dim=-1)
+    if num_tokens > 1:
+        slot_attention_entropy = (
+            slot_attention_entropy / math.log(num_tokens)
+        )
+    slot_attention_entropy = slot_attention_entropy.mean()
 
     delta_ratio = (
         (enhanced_cls.float() - image_cls.float()).norm(dim=-1)
@@ -220,7 +271,12 @@ def smca_diagnostics(
 
     return {
         "smca_feature_abs_cosine": feature_abs_cosine.detach(),
-        "smca_attention_entropy": attention_entropy.detach(),
+        "smca_slot_attention_abs_cosine":
+            slot_attention_abs_cosine.detach(),
+        "smca_slot_attention_entropy":
+            slot_attention_entropy.detach(),
+        "smca_cls_attention_entropy":
+            cls_attention_entropy.detach(),
         "smca_delta_ratio": delta_ratio.detach(),
     }
 

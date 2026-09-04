@@ -254,8 +254,9 @@ class IRRA(nn.Module):
             })
 
         if self.avm_mode == "slot_cross":
-            mask_features = self.slot_pool(
-                image_feats[:, 1:, :]
+            mask_features, slot_attention = self.slot_pool(
+                image_feats[:, 1:, :],
+                return_attention=True,
             )
             enhanced_i_feats, attention_weights = self.smca_cross_attn(
                 image_cls=i_feats,
@@ -282,6 +283,7 @@ class IRRA(nn.Module):
                 image_cls=i_feats,
                 enhanced_cls=enhanced_i_feats,
                 mask_features=mask_features,
+                slot_attention=slot_attention,
                 attention_weights=attention_weights,
             ))
 
