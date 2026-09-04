@@ -36,6 +36,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "avm_ret_loss": AverageMeter(),
         "avm_mask_mean": AverageMeter(),
         "avm_mask_std": AverageMeter(),
+        "smca_sdm_loss": AverageMeter(),
+        "smca_feature_abs_cosine": AverageMeter(),
+        "smca_attention_entropy": AverageMeter(),
+        "smca_delta_ratio": AverageMeter(),
         "entropy_loss": AverageMeter(),
         "fa_triplet_loss": AverageMeter(),
         "itc_loss": AverageMeter(),
@@ -77,6 +81,18 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             )
             meters['avm_mask_std'].update(
                 ret.get('avm_mask_std', 0), batch_size
+            )
+            meters['smca_sdm_loss'].update(
+                ret.get('smca_sdm_loss', 0), batch_size
+            )
+            meters['smca_feature_abs_cosine'].update(
+                ret.get('smca_feature_abs_cosine', 0), batch_size
+            )
+            meters['smca_attention_entropy'].update(
+                ret.get('smca_attention_entropy', 0), batch_size
+            )
+            meters['smca_delta_ratio'].update(
+                ret.get('smca_delta_ratio', 0), batch_size
             )
 
             optimizer.zero_grad()

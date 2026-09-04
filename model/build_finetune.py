@@ -1,7 +1,9 @@
 from model import objectives
 from .avm import (
+    CLS2MaskFeatureCrossAttention,
     SemanticSlotPool,
     SlotMaskHead,
+    smca_diagnostics,
     slot_gallery_embedding,
     slot_scores,
 )
@@ -39,11 +41,20 @@ class IRRA(nn.Module):
                 "avm_mask_policy must be 'learned' or 'ones'"
             )
 
-        if self.avm_mode == "slot":
+        self.smca_cross_attn = None
+
+        if self.avm_mode in {"slot", "slot_cross"}:
             self.slot_pool = SemanticSlotPool(
                 self.embed_dim, self.avm_num_slots
             )
-            if self.avm_mask_policy == "learned":
+            if self.avm_mode == "slot_cross":
+                self.avm_mask_head = None
+                self.smca_cross_attn = CLS2MaskFeatureCrossAttention(
+                    embed_dim=self.embed_dim,
+                    num_heads=max(1, self.embed_dim // 64),
+                    residual_scale=0.1,
+                )
+            elif self.avm_mask_policy == "learned":
                 self.avm_mask_head = SlotMaskHead(
                     self.embed_dim, self.avm_num_slots
                 )
@@ -132,6 +143,16 @@ class IRRA(nn.Module):
 
     def encode_image(self, image):
         image_feats = self.base_model.encode_image(image)
+
+        if self.avm_mode == "slot_cross":
+            aerial_cls = image_feats[:, 0, :].float()
+            mask_features = self.slot_pool(
+                image_feats[:, 1:, :]
+            )
+            return self.smca_cross_attn(
+                image_cls=aerial_cls,
+                mask_features=mask_features,
+            )
 
         if self.avm_mode == "slot":
             aerial_cls = image_feats[:, 0, :].float()
@@ -231,6 +252,38 @@ class IRRA(nn.Module):
                 "avm_mask_std":
                     avm_mask.detach().std(unbiased=False),
             })
+
+        if self.avm_mode == "slot_cross":
+            mask_features = self.slot_pool(
+                image_feats[:, 1:, :]
+            )
+            enhanced_i_feats, attention_weights = self.smca_cross_attn(
+                image_cls=i_feats,
+                mask_features=mask_features,
+                return_attention=True,
+            )
+            raw_scores_t2i = (
+                F.normalize(t_feats.float(), p=2, dim=-1)
+                @ F.normalize(
+                    enhanced_i_feats.float(), p=2, dim=-1
+                ).t()
+            )
+            smca_sdm_loss = objectives.compute_sdm_from_scores(
+                raw_scores_t2i=raw_scores_t2i,
+                pid=batch["pids"],
+                logit_scale=logit_scale,
+            )
+
+            ret.update({
+                "smca_sdm_loss":
+                    self.args.avm_loss_weight * smca_sdm_loss,
+            })
+            ret.update(smca_diagnostics(
+                image_cls=i_feats,
+                enhanced_cls=enhanced_i_feats,
+                mask_features=mask_features,
+                attention_weights=attention_weights,
+            ))
 
         if 'fta' in self.current_task:
             B = text_feats.shape[0]

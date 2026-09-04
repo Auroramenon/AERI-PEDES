@@ -32,7 +32,11 @@ def build_optimizer(args, model):
             # lr = args.lr2
             # lr = args.lr2 * args.lr_factor
 
-        if "slot_pool" in key or "avm_mask_head" in key:
+        if (
+            "slot_pool" in key
+            or "avm_mask_head" in key
+            or "smca_cross_attn" in key
+        ):
             # Use the guide learning rate for new AVM parameters.
             lr = args.avm_lr
         

@@ -41,8 +41,11 @@ def get_args():
         "--avm_mode",
         type=str,
         default="none",
-        choices=["none", "slot"],
-        help="aerial visibility masking mode",
+        choices=["none", "slot", "slot_cross"],
+        help=(
+            "aerial feature mode: slot uses slot matching; slot_cross "
+            "uses image CLS-to-mask-feature cross attention"
+        ),
     )
     parser.add_argument(
         "--avm_num_slots",
@@ -54,7 +57,7 @@ def get_args():
         "--avm_loss_weight",
         type=float,
         default=1.0,
-        help="weight of the AVM slot retrieval loss",
+        help="weight of the AVM/SMCA retrieval loss",
     )
     parser.add_argument(
         "--avm_mask_policy",
