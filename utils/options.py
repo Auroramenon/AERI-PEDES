@@ -57,6 +57,16 @@ def get_args():
         help="weight of the AVM slot retrieval loss",
     )
     parser.add_argument(
+        "--avm_mask_policy",
+        type=str,
+        default="learned",
+        choices=["learned", "ones"],
+        help=(
+            "slot mask policy: learned predicts an aerial-conditioned "
+            "mask; ones disables learned masking"
+        ),
+    )
+    parser.add_argument(
         "--avm_lr",
         type=float,
         default=1e-4,

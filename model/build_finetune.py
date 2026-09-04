@@ -30,14 +30,25 @@ class IRRA(nn.Module):
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
         self.avm_mode = getattr(args, "avm_mode", "none")
         self.avm_num_slots = getattr(args, "avm_num_slots", 8)
+        self.avm_mask_policy = getattr(
+            args, "avm_mask_policy", "learned"
+        )
+
+        if self.avm_mask_policy not in {"learned", "ones"}:
+            raise ValueError(
+                "avm_mask_policy must be 'learned' or 'ones'"
+            )
 
         if self.avm_mode == "slot":
             self.slot_pool = SemanticSlotPool(
                 self.embed_dim, self.avm_num_slots
             )
-            self.avm_mask_head = SlotMaskHead(
-                self.embed_dim, self.avm_num_slots
-            )
+            if self.avm_mask_policy == "learned":
+                self.avm_mask_head = SlotMaskHead(
+                    self.embed_dim, self.avm_num_slots
+                )
+            else:
+                self.avm_mask_head = None
         elif self.avm_mode == "none":
             self.slot_pool = None
             self.avm_mask_head = None
@@ -94,7 +105,18 @@ class IRRA(nn.Module):
         self.current_task = [l.strip() for l in loss_names.split('+')]
         print(f'Training Model with {self.current_task} tasks')
     
-    
+    def _build_slot_mask(self, aerial_cls):
+        if self.avm_mask_policy == "ones":
+            return torch.ones(
+                aerial_cls.shape[0],
+                self.avm_num_slots,
+                device=aerial_cls.device,
+                dtype=torch.float32,
+            )
+
+        return self.avm_mask_head(aerial_cls)
+
+
     def cross_former(self, q, k, v):
         x = self.cross_attn(
                 self.ln_pre_t(q),
@@ -116,7 +138,7 @@ class IRRA(nn.Module):
             aerial_slots = self.slot_pool(
                 image_feats[:, 1:, :]
             )
-            mask = self.avm_mask_head(aerial_cls)
+            mask = self._build_slot_mask(aerial_cls)
             return slot_gallery_embedding(aerial_slots, mask)
 
         return image_feats[:, 0, :].float()
@@ -189,7 +211,7 @@ class IRRA(nn.Module):
             aerial_slots = self.slot_pool(
                 image_feats[:, 1:, :]
             )
-            avm_mask = self.avm_mask_head(i_feats)
+            avm_mask = self._build_slot_mask(i_feats)
             raw_scores_t2i = slot_scores(
                 text_slots=text_slots,
                 aerial_slots=aerial_slots,
