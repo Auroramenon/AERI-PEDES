@@ -57,6 +57,15 @@ def get_args():
         help="weight of the AVM slot retrieval loss",
     )
     parser.add_argument(
+        "--avm_plain_branch_ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "fraction of AVM retrieval loss assigned to the "
+            "unmasked plain-slot branch"
+        ),
+    )
+    parser.add_argument(
         "--avm_lr",
         type=float,
         default=1e-4,

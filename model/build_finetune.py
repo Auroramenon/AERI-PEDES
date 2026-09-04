@@ -30,6 +30,14 @@ class IRRA(nn.Module):
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
         self.avm_mode = getattr(args, "avm_mode", "none")
         self.avm_num_slots = getattr(args, "avm_num_slots", 8)
+        self.avm_plain_branch_ratio = getattr(
+            args, "avm_plain_branch_ratio", 0.0
+        )
+
+        if not 0.0 <= self.avm_plain_branch_ratio <= 1.0:
+            raise ValueError(
+                "avm_plain_branch_ratio must be in [0, 1]"
+            )
 
         if self.avm_mode == "slot":
             self.slot_pool = SemanticSlotPool(
@@ -190,25 +198,52 @@ class IRRA(nn.Module):
                 image_feats[:, 1:, :]
             )
             avm_mask = self.avm_mask_head(i_feats)
-            raw_scores_t2i = slot_scores(
+            masked_scores_t2i = slot_scores(
                 text_slots=text_slots,
                 aerial_slots=aerial_slots,
                 mask=avm_mask,
             )
-            avm_ret_loss = objectives.compute_sdm_from_scores(
-                raw_scores_t2i=raw_scores_t2i,
+            masked_ret = objectives.compute_sdm_from_scores(
+                raw_scores_t2i=masked_scores_t2i,
                 pid=batch["pids"],
                 logit_scale=logit_scale,
             )
 
+            plain_ratio = self.avm_plain_branch_ratio
+            if plain_ratio > 0:
+                plain_mask = torch.ones_like(avm_mask)
+                plain_scores_t2i = slot_scores(
+                    text_slots=text_slots,
+                    aerial_slots=aerial_slots,
+                    mask=plain_mask,
+                )
+                plain_ret = objectives.compute_sdm_from_scores(
+                    raw_scores_t2i=plain_scores_t2i,
+                    pid=batch["pids"],
+                    logit_scale=logit_scale,
+                )
+                combined_ret = (
+                    plain_ratio * plain_ret
+                    + (1.0 - plain_ratio) * masked_ret
+                )
+            else:
+                plain_ret = None
+                combined_ret = masked_ret
+
             ret.update({
                 "avm_ret_loss":
-                    self.args.avm_loss_weight * avm_ret_loss,
+                    self.args.avm_loss_weight * combined_ret,
                 "avm_mask_mean":
                     avm_mask.detach().mean(),
                 "avm_mask_std":
                     avm_mask.detach().std(unbiased=False),
             })
+
+            if plain_ret is not None:
+                ret.update({
+                    "avm_plain_ret": plain_ret.detach(),
+                    "avm_masked_ret": masked_ret.detach(),
+                })
 
         if 'fta' in self.current_task:
             B = text_feats.shape[0]
