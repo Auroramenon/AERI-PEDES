@@ -269,6 +269,33 @@ def compute_fa_infonce_loss(S_t2v, S_v2t, logit_scale=0.07):
     return loss
 
 
+def compute_slot_decorrelation_loss(slots, eps=1e-6):
+    """Penalize cosine similarity between different semantic slots."""
+    if slots.ndim != 3:
+        raise ValueError(
+            f"slots must have shape [B, K, D], got {slots.shape}"
+        )
+
+    num_slots = slots.shape[1]
+    if num_slots < 2:
+        return slots.float().sum() * 0.0
+
+    unit_slots = F.normalize(
+        slots.float(), p=2, dim=-1, eps=eps
+    )
+    gram = torch.bmm(
+        unit_slots, unit_slots.transpose(1, 2)
+    )
+    diagonal = torch.eye(
+        num_slots,
+        device=slots.device,
+        dtype=torch.bool,
+    )
+    off_diagonal = gram[:, ~diagonal]
+
+    return off_diagonal.pow(2).mean()
+
+
 def compute_sdm_from_scores(
     raw_scores_t2i,
     pid,

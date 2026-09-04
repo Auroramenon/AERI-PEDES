@@ -30,6 +30,14 @@ class IRRA(nn.Module):
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
         self.avm_mode = getattr(args, "avm_mode", "none")
         self.avm_num_slots = getattr(args, "avm_num_slots", 8)
+        self.avm_div_loss_weight = getattr(
+            args, "avm_div_loss_weight", 0.0
+        )
+
+        if self.avm_div_loss_weight < 0:
+            raise ValueError(
+                "avm_div_loss_weight must be non-negative"
+            )
 
         if self.avm_mode == "slot":
             self.slot_pool = SemanticSlotPool(
@@ -200,6 +208,25 @@ class IRRA(nn.Module):
                 pid=batch["pids"],
                 logit_scale=logit_scale,
             )
+
+            if self.avm_div_loss_weight > 0:
+                text_div = (
+                    objectives.compute_slot_decorrelation_loss(
+                        text_slots
+                    )
+                )
+                aerial_div = (
+                    objectives.compute_slot_decorrelation_loss(
+                        aerial_slots
+                    )
+                )
+                div_raw = text_div + aerial_div
+
+                ret.update({
+                    "avm_div_loss":
+                        self.avm_div_loss_weight * div_raw,
+                    "avm_div_raw": div_raw.detach(),
+                })
 
             ret.update({
                 "avm_ret_loss":

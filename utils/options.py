@@ -57,6 +57,12 @@ def get_args():
         help="weight of the AVM slot retrieval loss",
     )
     parser.add_argument(
+        "--avm_div_loss_weight",
+        type=float,
+        default=0.0,
+        help="lambda_div for semantic slot decorrelation",
+    )
+    parser.add_argument(
         "--avm_lr",
         type=float,
         default=1e-4,
