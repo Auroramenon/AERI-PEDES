@@ -12,6 +12,9 @@ def get_args():
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--no_save", default=False, action='store_true',
+                        help="skip checkpoint saving (for ablation sweeps)")
 
     parser.add_argument("--finetune", type=str, default="pretrain/HAMbest0.pth")
     parser.add_argument("--clip_download_root", type=str, default=None,
