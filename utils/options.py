@@ -73,6 +73,15 @@ def get_args():
         help="tau_v for the detached ground-aerial q_k target",
     )
     parser.add_argument(
+        "--avm_qk_standardize",
+        default=False,
+        action='store_true',
+        help=(
+            "z-score the ground-aerial cosine before the "
+            "q_k sigmoid to avoid saturation"
+        ),
+    )
+    parser.add_argument(
         "--avm_mask_loss_weight",
         type=float,
         default=0.0,

@@ -101,7 +101,7 @@ class SlotMaskHead(nn.Module):
 
 
 def ground_aerial_slot_target(
-    ground_slots, aerial_slots, temperature
+    ground_slots, aerial_slots, temperature, standardize=False
 ):
     """Build the detached ground-aerial slot agreement target q_k."""
     if ground_slots.ndim != 3 or aerial_slots.ndim != 3:
@@ -118,6 +118,15 @@ def ground_aerial_slot_target(
     agreement = F.cosine_similarity(
         ground_slots.float(), aerial_slots.float(), dim=-1
     )
+
+    if standardize:
+        # Spread the agreement across the sigmoid's useful range so
+        # that q_k does not saturate when the cosines sit in a
+        # narrow band.
+        mean = agreement.mean()
+        std = agreement.std(unbiased=False).clamp_min(1e-6)
+        agreement = (agreement - mean) / std
+
     return torch.sigmoid(agreement / temperature).detach()
 
 

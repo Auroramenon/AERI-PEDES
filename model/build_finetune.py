@@ -40,6 +40,9 @@ class IRRA(nn.Module):
         self.avm_mask_loss_weight = getattr(
             args, "avm_mask_loss_weight", 0.0
         )
+        self.avm_qk_standardize = getattr(
+            args, "avm_qk_standardize", False
+        )
 
         if self.avm_mode == "slot":
             self.slot_pool = SemanticSlotPool(
@@ -260,6 +263,7 @@ class IRRA(nn.Module):
                     ground_slots=ground_slots,
                     aerial_slots=aerial_slots,
                     temperature=self.avm_qk_temperature,
+                    standardize=self.avm_qk_standardize,
                 )
                 mask_bce = F.binary_cross_entropy(
                     avm_mask, q_target
@@ -272,6 +276,8 @@ class IRRA(nn.Module):
                     "avm_q_mean": q_target.mean(),
                     "avm_q_std":
                         q_target.std(unbiased=False),
+                    "avm_q_sat":
+                        (q_target > 0.95).float().mean(),
                 })
 
         if 'fta' in self.current_task:

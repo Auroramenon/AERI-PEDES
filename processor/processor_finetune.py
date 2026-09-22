@@ -40,6 +40,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "avm_mask_std": AverageMeter(),
         "avm_q_mean": AverageMeter(),
         "avm_q_std": AverageMeter(),
+        "avm_q_sat": AverageMeter(),
         "entropy_loss": AverageMeter(),
         "fa_triplet_loss": AverageMeter(),
         "itc_loss": AverageMeter(),
@@ -93,6 +94,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             )
             meters['avm_q_std'].update(
                 ret.get('avm_q_std', 0), batch_size
+            )
+            meters['avm_q_sat'].update(
+                ret.get('avm_q_sat', 0), batch_size
             )
 
             optimizer.zero_grad()
