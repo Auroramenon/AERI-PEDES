@@ -115,6 +115,7 @@ class SlotQkIntegrationTest(unittest.TestCase):
                 "avm_mask_std",
                 "avm_q_mean",
                 "avm_q_std",
+                "avm_q_sat",
             },
         )
         self.assertTrue(
