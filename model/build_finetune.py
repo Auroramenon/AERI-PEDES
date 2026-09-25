@@ -1,5 +1,18 @@
 from model import objectives
-from .avm import FeatureMaskHead, feature_gallery_embedding, feature_scores
+from .avm import (
+    FeatureMaskHead,
+    HierarchicalMaskGenerator,
+    PrototypeHead,
+    StaticMask,
+    arcface_logits,
+    dpm_retrieval_scores,
+    feature_gallery_embedding,
+    feature_scores,
+    mask_statistics,
+    occlude_band,
+    participation_ratio,
+    text_side_masked_scores,
+)
 from .clip_model import ResidualAttentionBlock, ResidualCrossAttentionBlock, Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
 import numpy as np
 import torch
@@ -24,9 +37,41 @@ class IRRA(nn.Module):
         self.embed_dim = base_cfg['embed_dim']
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
         self.avm_mode = getattr(args, "avm_mode", "none")
+        self.avm_margin = getattr(args, "avm_margin", 0.0)
+        self.avm_mask_input = getattr(args, "avm_mask_input", "cls")
+        self.avm_mask_policy = getattr(args, "avm_mask_policy", "learned")
+        self.avm_detach_backbone = getattr(args, "avm_detach_backbone", False)
+        self.avm_eval_score = getattr(args, "avm_eval_score", "masked")
+        self.avm_occ_ratio = getattr(args, "avm_occ_ratio", 0.0)
+        self.avm_occ_weight = getattr(args, "avm_occ_weight", 1.0)
+        self.avm_occ_rank_weight = getattr(args, "avm_occ_rank_weight", 0.0)
+        self.avm_occ_rank_margin = getattr(args, "avm_occ_rank_margin", 0.05)
+        self.avm_id_plain_weight = getattr(args, "avm_id_plain_weight", 0.0)
+        self.avm_id_masked_weight = getattr(args, "avm_id_masked_weight", 0.0)
+        self.avm_id_margin = getattr(args, "avm_id_margin", 0.5)
+        self.avm_id_scale = getattr(args, "avm_id_scale", 30.0)
+        self.avm_id_classes = getattr(args, "avm_id_classes", 0)
+        self.avm_id_head = None
+
+        if self.avm_mode != "dpm" and (
+            self.avm_margin != 0.0
+            or self.avm_mask_input != "cls"
+            or self.avm_mask_policy != "learned"
+            or self.avm_detach_backbone
+            or self.avm_occ_ratio != 0.0
+            or self.avm_id_plain_weight != 0.0
+            or self.avm_id_masked_weight != 0.0
+        ):
+            raise ValueError(
+                "--avm_margin / --avm_mask_input / --avm_mask_policy / "
+                "--avm_detach_backbone / --avm_occ_* / --avm_id_* "
+                "only apply to --avm_mode dpm"
+            )
 
         if self.avm_mode == "feature":
             self.avm_mask_head = FeatureMaskHead(self.embed_dim)
+        elif self.avm_mode == "dpm":
+            self._build_dpm_mask_head()
         elif self.avm_mode == "none":
             self.avm_mask_head = None
         else:
@@ -81,7 +126,163 @@ class IRRA(nn.Module):
         loss_names = self.args.loss_names
         self.current_task = [l.strip() for l in loss_names.split('+')]
         print(f'Training Model with {self.current_task} tasks')
-    
+
+    def _build_dpm_mask_head(self):
+        if self.avm_margin < 0:
+            raise ValueError("avm_margin must be non-negative")
+        if self.avm_eval_score not in ("masked", "plain", "sum"):
+            raise ValueError(f"Unsupported avm_eval_score: {self.avm_eval_score}")
+
+        policy, source = self.avm_mask_policy, self.avm_mask_input
+        if policy == "learned":
+            if source == "hmg":
+                visual = self.base_model.visual
+                self.avm_mask_head = HierarchicalMaskGenerator(
+                    width=visual.transformer.width,
+                    out_dim=self.embed_dim,
+                    grid_hw=(visual.num_y, visual.num_x),
+                )
+            elif source == "cls":
+                self.avm_mask_head = FeatureMaskHead(self.embed_dim)
+            else:
+                raise ValueError(f"Unsupported avm_mask_input: {source}")
+        elif source != "cls":
+            raise ValueError(
+                f"avm_mask_policy={policy} takes no image input; "
+                "leave avm_mask_input at cls"
+            )
+        elif policy == "static":
+            self.avm_mask_head = StaticMask(self.embed_dim)
+        elif policy == "ones":
+            if self.avm_detach_backbone:
+                raise ValueError(
+                    "avm_mask_policy=ones with avm_detach_backbone leaves "
+                    "the masked branch with nothing to train"
+                )
+            self.avm_mask_head = None
+        else:
+            raise ValueError(f"Unsupported avm_mask_policy: {policy}")
+
+        if self.avm_occ_ratio:
+            if not 0.0 < self.avm_occ_ratio < 1.0:
+                raise ValueError("avm_occ_ratio must be in (0, 1)")
+            if policy != "learned":
+                raise ValueError(
+                    "controlled occlusion needs an image-dependent mask "
+                    "(avm_mask_policy=learned)"
+                )
+            if min(self.avm_occ_weight, self.avm_occ_rank_weight, self.avm_occ_rank_margin) < 0:
+                raise ValueError("avm_occ_* weights and margin must be non-negative")
+            if self.avm_occ_weight == 0 and self.avm_occ_rank_weight == 0:
+                raise ValueError("avm_occ_ratio is set but no loss uses the occluded copy")
+
+        if min(self.avm_id_plain_weight, self.avm_id_masked_weight) < 0:
+            raise ValueError("avm_id_* weights must be non-negative")
+        if self.avm_id_plain_weight > 0 or self.avm_id_masked_weight > 0:
+            if self.avm_id_classes <= 0:
+                raise ValueError(
+                    "identity losses need avm_id_classes (finetune.py sets it "
+                    "to max train pid + 1)"
+                )
+            self.avm_id_head = PrototypeHead(self.avm_id_classes, self.embed_dim)
+
+    def _dpm_mask(self, aerial_cls, hidden):
+        """Aerial-conditioned channel mask [B, embed_dim] for the dpm mode."""
+        if self.avm_mask_policy == "ones":
+            return torch.ones_like(aerial_cls, dtype=torch.float32)
+        if self.avm_mask_policy == "static":
+            return self.avm_mask_head(aerial_cls.shape[0])
+        if self.avm_mask_input == "hmg":
+            return self.avm_mask_head(hidden)
+        return self.avm_mask_head(aerial_cls)
+
+    def _encode_aerial_with_hidden(self, image):
+        return self.base_model.visual.forward_with_hidden(
+            image.type(self.base_model.dtype),
+            HierarchicalMaskGenerator.LAYERS,
+        )
+
+    def _dpm_id_losses(self, ret, i_feats, t_feats, aerial_in, avm_mask, pids):
+        """Idea 2: DPM's plain + masked identity losses (loss/make_loss.py)."""
+        if int(pids.max()) >= self.avm_id_head.weight.shape[0]:
+            raise RuntimeError(
+                f"pid {int(pids.max())} exceeds avm_id_classes "
+                f"{self.avm_id_head.weight.shape[0]}"
+            )
+        if self.avm_id_plain_weight > 0:
+            # Plain branch: shared prototypes for aerial and text, so the
+            # prototype space is the space the mask meets text in at test.
+            ret["avm_id_loss"] = self.avm_id_plain_weight * objectives.compute_id(
+                self.avm_id_head.plain_logits(i_feats),
+                self.avm_id_head.plain_logits(t_feats),
+                pids,
+            )
+        if self.avm_id_masked_weight > 0:
+            logits = arcface_logits(
+                self.avm_id_head.masked_cosine(aerial_in, avm_mask),
+                pids,
+                scale=self.avm_id_scale,
+                margin=self.avm_id_margin,
+            )
+            ret["avm_mid_loss"] = self.avm_id_masked_weight * F.cross_entropy(logits, pids.long())
+
+    def _dpm_occlusion_losses(self, ret, images, aerial_in, text_in, hidden_in, avm_mask, pids, logit_scale):
+        """Idea 1: an occluded aerial copy supervises the mask instead of q_k.
+
+        The occluded copy goes through the backbone without gradients and
+        the clean side is detached, so these losses only train the mask
+        generator.
+        """
+        with torch.no_grad():
+            occluded = occlude_band(images, self.avm_occ_ratio)
+            with torch.autocast(dtype=torch.float16, device_type='cuda'):
+                if self._uses_hidden_states():
+                    occ_feats, occ_hidden = self._encode_aerial_with_hidden(occluded)
+                else:
+                    occ_feats, occ_hidden = self.base_model.encode_image(occluded), None
+        occ_cls = occ_feats[:, 0, :].float()
+        occ_mask = self._dpm_mask(occ_cls, occ_hidden)
+        occ_eff = participation_ratio(occ_mask)
+        ret["avm_occ_eff"] = occ_eff.detach().mean()
+
+        if self.avm_occ_weight > 0:
+            # The masked metric must still find the right text when part of
+            # the person is missing, with the same margin as the clean branch.
+            occ_scores = text_side_masked_scores(text_in.detach(), occ_cls, occ_mask)
+            ret["avm_occ_loss"] = self.avm_occ_weight * objectives.compute_sdm_from_scores(
+                raw_scores_t2i=occ_scores,
+                pid=pids,
+                logit_scale=logit_scale,
+                margin=self.avm_margin,
+            )
+        if self.avm_occ_rank_weight > 0:
+            # Seeing less should mean trusting fewer channels. The clean mask
+            # is re-predicted from detached inputs unless they already are.
+            if self.avm_detach_backbone:
+                clean_mask = avm_mask
+            else:
+                clean_hidden = None
+                if hidden_in is not None:
+                    clean_hidden = {k: v.detach() for k, v in hidden_in.items()}
+                clean_mask = self._dpm_mask(aerial_in.detach(), clean_hidden)
+            clean_eff = participation_ratio(clean_mask)
+            ret["avm_occ_rank_loss"] = self.avm_occ_rank_weight * F.relu(
+                occ_eff - clean_eff + self.avm_occ_rank_margin
+            ).mean()
+
+    def _uses_hidden_states(self):
+        return (
+            self.avm_mode == "dpm"
+            and self.avm_mask_policy == "learned"
+            and self.avm_mask_input == "hmg"
+        )
+
+    def retrieval_scores(self, qfeats, gfeats):
+        """Named [N_text, N_aerial] score matrices used by the evaluator."""
+        if self.avm_mode != "dpm":
+            raise RuntimeError("retrieval_scores is only defined for avm_mode=dpm")
+        return dpm_retrieval_scores(qfeats, gfeats, self.embed_dim)
+
     
     def cross_former(self, q, k, v):
         x = self.cross_attn(
@@ -97,12 +298,21 @@ class IRRA(nn.Module):
         return x
 
     def encode_image(self, image):
-        image_feats = self.base_model.encode_image(image)
+        hidden = None
+        if self._uses_hidden_states():
+            image_feats, hidden = self._encode_aerial_with_hidden(image)
+        else:
+            image_feats = self.base_model.encode_image(image)
         aerial_cls = image_feats[:, 0, :].float()
 
         if self.avm_mode == "feature":
             mask = self.avm_mask_head(aerial_cls)
             return feature_gallery_embedding(aerial_cls, mask)
+
+        if self.avm_mode == "dpm":
+            # Gallery row = [aerial CLS | mask]; retrieval_scores unpacks it.
+            mask = self._dpm_mask(aerial_cls, hidden)
+            return torch.cat([aerial_cls, mask.float()], dim=-1)
 
         return aerial_cls
 
@@ -148,8 +358,24 @@ class IRRA(nn.Module):
         ground_images = batch['ground_imgs']
         # ground_images = None
         caption_ids = batch['caption_ids']
+        hidden = None
         with torch.autocast(dtype=torch.float16, device_type='cuda'):
-            image_feats, ground_image_feats, text_feats = self.base_model(images, ground_images, caption_ids)
+            if self._uses_hidden_states():
+                # Same calls as CLIP.forward's single-text branch, with the
+                # aerial encoder also returning the blocks the HMG needs.
+                if caption_ids.size(0) == 2 * images.size(0):
+                    raise RuntimeError(
+                        "avm_mask_input=hmg does not support the doubled-text "
+                        "branch of CLIP.forward"
+                    )
+                image_feats, hidden = self._encode_aerial_with_hidden(images)
+                if ground_images is not None:
+                    ground_image_feats = self.base_model.encode_image(ground_images)
+                else:
+                    ground_image_feats = None
+                text_feats = self.base_model.encode_text(caption_ids)
+            else:
+                image_feats, ground_image_feats, text_feats = self.base_model(images, ground_images, caption_ids)
 
         i_feats = image_feats[:, 0, :].float()
         if ground_image_feats is not None:
@@ -182,6 +408,49 @@ class IRRA(nn.Module):
                 "avm_mask_std":
                     avm_mask.detach().std(unbiased=False),
             })
+
+        if self.avm_mode == "dpm":
+            # DPM two-branch objective: the CFAN losses above are the plain
+            # branch; this is the masked branch, scored with the aerial mask
+            # applied to every text candidate and trained with a margin.
+            aerial_in, text_in, hidden_in = i_feats, t_feats, hidden
+            if self.avm_detach_backbone:
+                aerial_in, text_in = i_feats.detach(), t_feats.detach()
+                if hidden is not None:
+                    hidden_in = {k: v.detach() for k, v in hidden.items()}
+
+            avm_mask = self._dpm_mask(aerial_in, hidden_in)
+            masked_scores_t2i = text_side_masked_scores(
+                text_feats=text_in,
+                aerial_feats=aerial_in,
+                mask=avm_mask,
+            )
+            avm_ret_loss = objectives.compute_sdm_from_scores(
+                raw_scores_t2i=masked_scores_t2i,
+                pid=batch["pids"],
+                logit_scale=logit_scale,
+                margin=self.avm_margin,
+            )
+            instance_std, participation = mask_statistics(avm_mask)
+
+            ret.update({
+                "avm_ret_loss":
+                    self.args.avm_loss_weight * avm_ret_loss,
+                "avm_mask_mean":
+                    avm_mask.detach().mean(),
+                "avm_mask_std":
+                    avm_mask.detach().std(unbiased=False),
+                "avm_mask_inst_std": instance_std,
+                "avm_mask_eff": participation,
+            })
+
+            if self.avm_id_head is not None:
+                self._dpm_id_losses(ret, i_feats, t_feats, aerial_in, avm_mask, batch["pids"])
+            if self.avm_occ_ratio:
+                self._dpm_occlusion_losses(
+                    ret, images, aerial_in, text_in, hidden_in, avm_mask,
+                    batch["pids"], logit_scale,
+                )
 
         if 'fta' in self.current_task:
             B = text_feats.shape[0]

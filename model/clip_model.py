@@ -341,7 +341,7 @@ class VisionTransformer(nn.Module):
         
         # self.style = AdaIN(p=0.5)
 
-    def forward(self, x, modal=None):
+    def _embed_tokens(self, x):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -350,16 +350,37 @@ class VisionTransformer(nn.Module):
 
         x = self.ln_pre(x)
 
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x,modal)
+        return x.permute(1, 0, 2)  # NLD -> LND
+
+    def _project_tokens(self, x):
         x = x.permute(1, 0, 2)  # LND -> NLD
-    
+
         # x = self.ln_post(x[:, 0, :])
         x = self.ln_post(x)
 
         if self.proj is not None:
             x = x @ self.proj
         return x
+
+    def forward(self, x, modal=None):
+        x = self._embed_tokens(x)
+        x = self.transformer(x,modal)
+        return self._project_tokens(x)
+
+    def forward_with_hidden(self, x, layers):
+        """Plain forward that also returns the listed blocks' outputs.
+
+        Same computation as forward(x, modal=None), which runs every block
+        in order in both train and eval mode. Hidden states are LND
+        tokens of width `width`, before ln_post and proj.
+        """
+        x = self._embed_tokens(x)
+        hidden = {}
+        for index, block in enumerate(self.transformer.resblocks):
+            x = block(x)
+            if index in layers:
+                hidden[index] = x
+        return self._project_tokens(x), hidden
 
 class CLIP(nn.Module):
     def __init__(self,

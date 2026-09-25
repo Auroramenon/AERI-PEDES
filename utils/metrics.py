@@ -77,7 +77,15 @@ class Evaluator():
 
         qfeats, gfeats, qids, gids = self._compute_embedding(model)
 
-        
+        if getattr(model, "avm_mode", "none") == "dpm":
+            return self._eval_named_scores(model, qfeats, gfeats, qids, gids)
+        if qfeats.shape[1] != gfeats.shape[1]:
+            # e.g. a dpm model wrapped in DataParallel: packed gallery rows
+            # must not be scored with a plain cosine.
+            raise ValueError(
+                f"text width {qfeats.shape[1]} != image width {gfeats.shape[1]}; "
+                "pass the unwrapped model"
+            )
 
         qfeats = F.normalize(qfeats, p=2, dim=1) # text features
         gfeats = F.normalize(gfeats, p=2, dim=1) # image features
@@ -101,5 +109,37 @@ class Evaluator():
         table.custom_format["mAP"] = lambda f, v: f"{v:.3f}"
         table.custom_format["mINP"] = lambda f, v: f"{v:.3f}"
         self.logger.info('\n' + str(table))
-        
+
         return t2i_cmc[0] + t2i_cmc[4] + t2i_cmc[9]
+
+    def _eval_named_scores(self, model, qfeats, gfeats, qids, gids):
+        """Rank every score the dpm model exposes; report the chosen one.
+
+        The chosen score is printed as the 't2i' row, so log parsers that
+        read one '| t2i' row per evaluation keep working; the plain, masked
+        and sum rows are named so they never match '^| *t2i'.
+        """
+        selected = model.avm_eval_score
+        table = PrettyTable(["task", "R1", "R5", "R10", "RSum", "mAP", "mINP"])
+        rows, selected_rsum = [], None
+
+        for name, similarity in model.retrieval_scores(qfeats, gfeats).items():
+            cmc, mAP, mINP, _ = rank(similarity=similarity, q_pids=qids, g_pids=gids, max_rank=10, get_mAP=True)
+            cmc, mAP, mINP = cmc.numpy(), mAP.numpy(), mINP.numpy()
+            row = [cmc[0], cmc[4], cmc[9], cmc[0] + cmc[4] + cmc[9], mAP, mINP]
+            rows.append([name] + row)
+            if name == selected:
+                table.add_row(['t2i'] + row)
+                selected_rsum = row[3]
+            del similarity
+
+        if selected_rsum is None:
+            raise ValueError(f"avm_eval_score {selected!r} is not one of the model's scores")
+
+        for row in rows:
+            table.add_row(row)
+        for column in ["R1", "R5", "R10", "RSum", "mAP", "mINP"]:
+            table.custom_format[column] = lambda f, v: f"{v:.3f}"
+        self.logger.info(f'dpm scores, t2i = {selected}\n' + str(table))
+
+        return selected_rsum

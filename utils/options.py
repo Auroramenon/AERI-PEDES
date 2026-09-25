@@ -44,8 +44,101 @@ def get_args():
         "--avm_mode",
         type=str,
         default="none",
-        choices=["none", "feature"],
+        choices=["none", "feature", "dpm"],
         help="aerial visibility masking mode",
+    )
+    parser.add_argument(
+        "--avm_margin",
+        type=float,
+        default=0.0,
+        help="dpm: additive cosine margin on same-PID pairs in the masked SDM",
+    )
+    parser.add_argument(
+        "--avm_mask_input",
+        type=str,
+        default="cls",
+        choices=["cls", "hmg"],
+        help="dpm: mask from the aerial CLS (MLP) or DPM++ hierarchical "
+             "mask generator on blocks 2/4/10/12",
+    )
+    parser.add_argument(
+        "--avm_mask_policy",
+        type=str,
+        default="learned",
+        choices=["learned", "static", "ones"],
+        help="dpm: per-image learned mask, one shared learned mask, "
+             "or all ones (margin-only control)",
+    )
+    parser.add_argument(
+        "--avm_detach_backbone",
+        default=False,
+        action='store_true',
+        help="dpm: masked-branch loss updates only the mask generator",
+    )
+    parser.add_argument(
+        "--avm_eval_score",
+        type=str,
+        default="masked",
+        choices=["masked", "plain", "sum"],
+        help="dpm: score reported as t2i and used to pick best0",
+    )
+    # Idea 1: controlled occlusion (dpm, learned mask only).
+    parser.add_argument(
+        "--avm_occ_ratio",
+        type=float,
+        default=0.0,
+        help="dpm: height fraction blanked in an extra occluded aerial copy "
+             "(0 = off); its backbone pass runs without gradients",
+    )
+    parser.add_argument(
+        "--avm_occ_weight",
+        type=float,
+        default=1.0,
+        help="dpm: weight of the masked SDM between texts and the occluded copy",
+    )
+    parser.add_argument(
+        "--avm_occ_rank_weight",
+        type=float,
+        default=0.0,
+        help="dpm: weight of the hinge asking the occluded mask to use fewer "
+             "channels than the clean mask",
+    )
+    parser.add_argument(
+        "--avm_occ_rank_margin",
+        type=float,
+        default=0.05,
+        help="dpm: required participation-ratio gap, clean minus occluded",
+    )
+    # Idea 2: literal DPM masked ID loss (dpm).
+    parser.add_argument(
+        "--avm_id_plain_weight",
+        type=float,
+        default=0.0,
+        help="dpm: weight of the plain identity softmax on aerial and text",
+    )
+    parser.add_argument(
+        "--avm_id_masked_weight",
+        type=float,
+        default=0.0,
+        help="dpm: weight of the masked ArcFace identity loss on aerial",
+    )
+    parser.add_argument(
+        "--avm_id_margin",
+        type=float,
+        default=0.5,
+        help="dpm: ArcFace angular margin of the masked identity loss",
+    )
+    parser.add_argument(
+        "--avm_id_scale",
+        type=float,
+        default=30.0,
+        help="dpm: ArcFace scale of the masked identity loss",
+    )
+    parser.add_argument(
+        "--avm_id_classes",
+        type=int,
+        default=0,
+        help="dpm: number of identity prototypes; 0 = max train pid + 1",
     )
     parser.add_argument(
         "--avm_loss_weight",

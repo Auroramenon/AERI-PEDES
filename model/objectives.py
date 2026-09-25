@@ -273,6 +273,7 @@ def compute_sdm_from_scores(
     pid,
     logit_scale,
     epsilon=1e-8,
+    margin=0.0,
 ):
     """
     Compute PID-aware bidirectional SDM from a raw similarity matrix.
@@ -281,6 +282,9 @@ def compute_sdm_from_scores(
         raw_scores_t2i: [B, B] unscaled text-to-aerial similarities.
         pid: [B] identity labels shared by paired text and aerial samples.
         logit_scale: inverse temperature, applied exactly once here.
+        margin: additive cosine margin subtracted from every same-PID
+            pair before scaling (DPM masked-branch margin). 0 keeps the
+            original SDM unchanged.
     """
     if raw_scores_t2i.ndim != 2:
         raise ValueError(
@@ -300,6 +304,11 @@ def compute_sdm_from_scores(
     labels_distribute = labels / labels.sum(
         dim=1, keepdim=True
     ).clamp_min(1.0)
+
+    if margin:
+        # Positives must beat negatives by `margin` in cosine units.
+        # labels is symmetric, so both directions get the same margin.
+        raw_scores_t2i = raw_scores_t2i - margin * labels
 
     # Temperature is applied once, at the SDM loss boundary.
     logits_t2i = logit_scale * raw_scores_t2i
