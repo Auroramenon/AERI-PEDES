@@ -138,7 +138,27 @@ def get_args():
         "--avm_id_classes",
         type=int,
         default=0,
-        help="dpm: number of identity prototypes; 0 = max train pid + 1",
+        help="dpm: number of identity prototypes; 0 = max - min train pid + 1",
+    )
+    parser.add_argument(
+        "--avm_id_offset",
+        type=int,
+        default=0,
+        help="dpm: added to pids to get 0-based class indices "
+             "(finetune.py sets it to -min train pid; AERI-PEDES has pid -1)",
+    )
+    parser.add_argument(
+        "--avm_eff_floor",
+        type=float,
+        default=0.0,
+        help="dpm: hinge floor on the mask participation ratio (0 = off); "
+             "limits how many channels the mask may drop",
+    )
+    parser.add_argument(
+        "--avm_eff_floor_weight",
+        type=float,
+        default=1.0,
+        help="dpm: weight of the participation-ratio floor hinge",
     )
     parser.add_argument(
         "--avm_loss_weight",

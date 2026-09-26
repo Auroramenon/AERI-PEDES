@@ -43,6 +43,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "avm_occ_loss": AverageMeter(),
         "avm_occ_rank_loss": AverageMeter(),
         "avm_occ_eff": AverageMeter(),
+        "avm_eff_floor_loss": AverageMeter(),
         "entropy_loss": AverageMeter(),
         "fa_triplet_loss": AverageMeter(),
         "itc_loss": AverageMeter(),
@@ -85,7 +86,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             )
             for key in ('avm_mask_inst_std', 'avm_mask_eff', 'avm_id_loss',
                         'avm_mid_loss', 'avm_occ_loss', 'avm_occ_rank_loss',
-                        'avm_occ_eff'):
+                        'avm_occ_eff', 'avm_eff_floor_loss'):
                 meters[key].update(ret.get(key, 0), batch_size)
             optimizer.zero_grad()
             total_loss.backward()

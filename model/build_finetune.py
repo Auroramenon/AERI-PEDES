@@ -51,7 +51,10 @@ class IRRA(nn.Module):
         self.avm_id_margin = getattr(args, "avm_id_margin", 0.5)
         self.avm_id_scale = getattr(args, "avm_id_scale", 30.0)
         self.avm_id_classes = getattr(args, "avm_id_classes", 0)
+        self.avm_id_offset = getattr(args, "avm_id_offset", 0)
         self.avm_id_head = None
+        self.avm_eff_floor = getattr(args, "avm_eff_floor", 0.0)
+        self.avm_eff_floor_weight = getattr(args, "avm_eff_floor_weight", 1.0)
 
         if self.avm_mode != "dpm" and (
             self.avm_margin != 0.0
@@ -61,11 +64,12 @@ class IRRA(nn.Module):
             or self.avm_occ_ratio != 0.0
             or self.avm_id_plain_weight != 0.0
             or self.avm_id_masked_weight != 0.0
+            or self.avm_eff_floor != 0.0
         ):
             raise ValueError(
                 "--avm_margin / --avm_mask_input / --avm_mask_policy / "
-                "--avm_detach_backbone / --avm_occ_* / --avm_id_* "
-                "only apply to --avm_mode dpm"
+                "--avm_detach_backbone / --avm_occ_* / --avm_id_* / "
+                "--avm_eff_floor only apply to --avm_mode dpm"
             )
 
         if self.avm_mode == "feature":
@@ -186,6 +190,14 @@ class IRRA(nn.Module):
                 )
             self.avm_id_head = PrototypeHead(self.avm_id_classes, self.embed_dim)
 
+        if self.avm_eff_floor:
+            if not 0.0 < self.avm_eff_floor < 1.0:
+                raise ValueError("avm_eff_floor must be in (0, 1)")
+            if self.avm_eff_floor_weight <= 0:
+                raise ValueError("avm_eff_floor_weight must be positive")
+            if policy == "ones":
+                raise ValueError("an all-ones mask always has eff = 1; the floor does nothing")
+
     def _dpm_mask(self, aerial_cls, hidden):
         """Aerial-conditioned channel mask [B, embed_dim] for the dpm mode."""
         if self.avm_mask_policy == "ones":
@@ -204,10 +216,15 @@ class IRRA(nn.Module):
 
     def _dpm_id_losses(self, ret, i_feats, t_feats, aerial_in, avm_mask, pids):
         """Idea 2: DPM's plain + masked identity losses (loss/make_loss.py)."""
-        if int(pids.max()) >= self.avm_id_head.weight.shape[0]:
+        # AERI-PEDES train pids are int(anno['pid']) - 1 and can be -1, so
+        # shift them to 0-based class indices (finetune.py sets the offset).
+        labels = pids.long() + self.avm_id_offset
+        num_ids = self.avm_id_head.weight.shape[0]
+        low, high = int(labels.min()), int(labels.max())
+        if low < 0 or high >= num_ids:
             raise RuntimeError(
-                f"pid {int(pids.max())} exceeds avm_id_classes "
-                f"{self.avm_id_head.weight.shape[0]}"
+                f"identity labels span [{low}, {high}] after offset "
+                f"{self.avm_id_offset}; avm_id_classes is {num_ids}"
             )
         if self.avm_id_plain_weight > 0:
             # Plain branch: shared prototypes for aerial and text, so the
@@ -215,16 +232,16 @@ class IRRA(nn.Module):
             ret["avm_id_loss"] = self.avm_id_plain_weight * objectives.compute_id(
                 self.avm_id_head.plain_logits(i_feats),
                 self.avm_id_head.plain_logits(t_feats),
-                pids,
+                labels,
             )
         if self.avm_id_masked_weight > 0:
             logits = arcface_logits(
                 self.avm_id_head.masked_cosine(aerial_in, avm_mask),
-                pids,
+                labels,
                 scale=self.avm_id_scale,
                 margin=self.avm_id_margin,
             )
-            ret["avm_mid_loss"] = self.avm_id_masked_weight * F.cross_entropy(logits, pids.long())
+            ret["avm_mid_loss"] = self.avm_id_masked_weight * F.cross_entropy(logits, labels)
 
     def _dpm_occlusion_losses(self, ret, images, aerial_in, text_in, hidden_in, avm_mask, pids, logit_scale):
         """Idea 1: an occluded aerial copy supervises the mask instead of q_k.
@@ -443,6 +460,15 @@ class IRRA(nn.Module):
                 "avm_mask_inst_std": instance_std,
                 "avm_mask_eff": participation,
             })
+
+            if self.avm_eff_floor:
+                # Batch 5: the more channels the mask dropped, the worse the
+                # masked score (eff 0.87 -> -0.7, 0.55 -> -3.8, 0.35 -> -6.8).
+                # A hinge floor on the participation ratio caps how selective
+                # the mask may become, like DPM++'s budget loss.
+                ret["avm_eff_floor_loss"] = self.avm_eff_floor_weight * F.relu(
+                    self.avm_eff_floor - participation_ratio(avm_mask)
+                ).mean()
 
             if self.avm_id_head is not None:
                 self._dpm_id_losses(ret, i_feats, t_feats, aerial_in, avm_mask, batch["pids"])

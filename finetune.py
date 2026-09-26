@@ -58,11 +58,15 @@ if __name__ == '__main__':
     # get image-text pair datasets dataloader
     trainset ,train_loader, val_img_loader, val_txt_loader, num_classes = build_zero_shot_loader(args,finetune=True)
     # num_classes above is the number of training samples; identity
-    # prototypes need the number of person IDs instead.
+    # prototypes need the number of person IDs instead. Train pids are
+    # int(anno['pid']) - 1 and include -1, so shift them to start at 0.
     uses_id = getattr(args, 'avm_id_plain_weight', 0) > 0 or getattr(args, 'avm_id_masked_weight', 0) > 0
     if uses_id and args.avm_id_classes <= 0:
-        args.avm_id_classes = max(int(sample[0]) for sample in trainset) + 1
-        logger.info("avm_id_classes = max train pid + 1 = {}".format(args.avm_id_classes))
+        train_pids = [int(sample[0]) for sample in trainset]
+        args.avm_id_offset = -min(train_pids)
+        args.avm_id_classes = max(train_pids) - min(train_pids) + 1
+        logger.info("identity prototypes: train pid range [{}, {}], {} distinct, avm_id_offset = {}, avm_id_classes = {}".format(
+            min(train_pids), max(train_pids), len(set(train_pids)), args.avm_id_offset, args.avm_id_classes))
     model = build_finetune_model(args, num_classes)
     logger.info('Total params: %2.fM' % (sum(p.numel() for p in model.parameters()) / 1000000.0))
     if args.finetune:

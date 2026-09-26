@@ -429,6 +429,40 @@ class DPMIntegrationTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_forward(model)
 
+    def test_negative_pid_needs_the_offset(self):
+        # AERI-PEDES train pids are int(anno['pid']) - 1 and include -1;
+        # batch 5 queue I died on a CUDA assert because of it.
+        self.batch["pids"] = torch.tensor([-1, -1, 0, 1])
+        with self.assertRaises(RuntimeError):
+            self.run_forward(build_model(
+                self.text_feats, avm_id_plain_weight=0.5, avm_id_masked_weight=0.5, avm_id_classes=3,
+            ))
+
+        model = build_model(
+            self.text_feats, avm_id_plain_weight=0.5, avm_id_masked_weight=0.5,
+            avm_id_classes=3, avm_id_offset=1,
+        )
+        ret = self.run_forward(model)
+        self.assertTrue(torch.isfinite(ret["avm_id_loss"]) and torch.isfinite(ret["avm_mid_loss"]))
+
+    def test_eff_floor_only_bites_below_the_floor(self):
+        model = build_model(self.text_feats, avm_margin=0.1, avm_eff_floor=0.9, avm_eff_floor_weight=10.0)
+
+        uniform = self.run_forward(model)
+        self.assertAlmostEqual(uniform["avm_eff_floor_loss"].item(), 0.0, places=6)
+
+        with torch.no_grad():
+            model.avm_mask_head.mlp[-1].bias.copy_(torch.linspace(-4, 4, EMBED))
+        selective = self.run_forward(model)
+        self.assertLess(selective["avm_mask_eff"].item(), 0.9)
+        self.assertAlmostEqual(
+            selective["avm_eff_floor_loss"].item(),
+            10.0 * (0.9 - selective["avm_mask_eff"].item()),
+            places=4,
+        )
+        selective["avm_eff_floor_loss"].backward()
+        self.assertGreater(model.avm_mask_head.mlp[-1].bias.grad.abs().sum().item(), 0.0)
+
     def test_occlusion_losses_only_train_the_mask(self):
         images = self.images.clone().requires_grad_(True)
         self.batch["images"] = images
@@ -468,6 +502,10 @@ class DPMIntegrationTest(unittest.TestCase):
             dict(avm_occ_ratio=1.0),
             dict(avm_occ_ratio=0.25, avm_occ_weight=0.0, avm_occ_rank_weight=0.0),
             dict(avm_id_masked_weight=0.5, avm_id_classes=0),
+            dict(avm_mode="feature", avm_eff_floor=0.9),
+            dict(avm_mask_policy="ones", avm_eff_floor=0.9),
+            dict(avm_eff_floor=1.0),
+            dict(avm_eff_floor=0.9, avm_eff_floor_weight=0.0),
         ]
         for overrides in bad:
             with self.subTest(**overrides), self.assertRaises(ValueError):
