@@ -11,6 +11,7 @@ from .avm import (
     mask_statistics,
     occlude_band,
     participation_ratio,
+    soft_row_correlation,
     text_side_masked_scores,
 )
 from .clip_model import ResidualAttentionBlock, ResidualCrossAttentionBlock, Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
@@ -55,6 +56,11 @@ class IRRA(nn.Module):
         self.avm_id_head = None
         self.avm_eff_floor = getattr(args, "avm_eff_floor", 0.0)
         self.avm_eff_floor_weight = getattr(args, "avm_eff_floor_weight", 1.0)
+        # Batch 7.
+        self.avm_mask_groups = getattr(args, "avm_mask_groups", 0)
+        self.avm_occ_vis_weight = getattr(args, "avm_occ_vis_weight", 0.0)
+        self.avm_eval_perm = getattr(args, "avm_eval_perm", False)
+        self.avm_two_step = getattr(args, "avm_two_step", False)
 
         if self.avm_mode != "dpm" and (
             self.avm_margin != 0.0
@@ -65,11 +71,16 @@ class IRRA(nn.Module):
             or self.avm_id_plain_weight != 0.0
             or self.avm_id_masked_weight != 0.0
             or self.avm_eff_floor != 0.0
+            or self.avm_mask_groups != 0
+            or self.avm_occ_vis_weight != 0.0
+            or self.avm_eval_perm
+            or self.avm_two_step
         ):
             raise ValueError(
                 "--avm_margin / --avm_mask_input / --avm_mask_policy / "
                 "--avm_detach_backbone / --avm_occ_* / --avm_id_* / "
-                "--avm_eff_floor only apply to --avm_mode dpm"
+                "--avm_eff_floor / --avm_mask_groups / --avm_eval_perm / "
+                "--avm_two_step only apply to --avm_mode dpm"
             )
 
         if self.avm_mode == "feature":
@@ -138,6 +149,8 @@ class IRRA(nn.Module):
             raise ValueError(f"Unsupported avm_eval_score: {self.avm_eval_score}")
 
         policy, source = self.avm_mask_policy, self.avm_mask_input
+        if self.avm_mask_groups and policy != "learned":
+            raise ValueError("avm_mask_groups needs avm_mask_policy=learned")
         if policy == "learned":
             if source == "hmg":
                 visual = self.base_model.visual
@@ -145,9 +158,10 @@ class IRRA(nn.Module):
                     width=visual.transformer.width,
                     out_dim=self.embed_dim,
                     grid_hw=(visual.num_y, visual.num_x),
+                    groups=self.avm_mask_groups,
                 )
             elif source == "cls":
-                self.avm_mask_head = FeatureMaskHead(self.embed_dim)
+                self.avm_mask_head = FeatureMaskHead(self.embed_dim, groups=self.avm_mask_groups)
             else:
                 raise ValueError(f"Unsupported avm_mask_input: {source}")
         elif source != "cls":
@@ -175,10 +189,13 @@ class IRRA(nn.Module):
                     "controlled occlusion needs an image-dependent mask "
                     "(avm_mask_policy=learned)"
                 )
-            if min(self.avm_occ_weight, self.avm_occ_rank_weight, self.avm_occ_rank_margin) < 0:
+            if min(self.avm_occ_weight, self.avm_occ_rank_weight, self.avm_occ_rank_margin,
+                   self.avm_occ_vis_weight) < 0:
                 raise ValueError("avm_occ_* weights and margin must be non-negative")
-            if self.avm_occ_weight == 0 and self.avm_occ_rank_weight == 0:
+            if self.avm_occ_weight == 0 and self.avm_occ_rank_weight == 0 and self.avm_occ_vis_weight == 0:
                 raise ValueError("avm_occ_ratio is set but no loss uses the occluded copy")
+        elif self.avm_occ_vis_weight:
+            raise ValueError("avm_occ_vis_weight needs the occluded copy (avm_occ_ratio > 0)")
 
         if min(self.avm_id_plain_weight, self.avm_id_masked_weight) < 0:
             raise ValueError("avm_id_* weights must be non-negative")
@@ -197,6 +214,11 @@ class IRRA(nn.Module):
                 raise ValueError("avm_eff_floor_weight must be positive")
             if policy == "ones":
                 raise ValueError("an all-ones mask always has eff = 1; the floor does nothing")
+
+        if self.avm_two_step and self.avm_mask_head is None:
+            # DPM's two-step update steps the mask generator on its own
+            # (solver.build_mask_optimizer); an all-ones mask has none.
+            raise ValueError("avm_two_step needs a trainable mask generator")
 
     def _dpm_mask(self, aerial_cls, hidden):
         """Aerial-conditioned channel mask [B, embed_dim] for the dpm mode."""
@@ -272,9 +294,10 @@ class IRRA(nn.Module):
                 logit_scale=logit_scale,
                 margin=self.avm_margin,
             )
-        if self.avm_occ_rank_weight > 0:
-            # Seeing less should mean trusting fewer channels. The clean mask
-            # is re-predicted from detached inputs unless they already are.
+        clean_mask = None
+        if self.avm_occ_rank_weight > 0 or self.avm_occ_vis_weight > 0:
+            # The clean mask is re-predicted from detached inputs unless they
+            # already are, so these losses only reach the mask generator.
             if self.avm_detach_backbone:
                 clean_mask = avm_mask
             else:
@@ -282,10 +305,26 @@ class IRRA(nn.Module):
                 if hidden_in is not None:
                     clean_hidden = {k: v.detach() for k, v in hidden_in.items()}
                 clean_mask = self._dpm_mask(aerial_in.detach(), clean_hidden)
+        if self.avm_occ_rank_weight > 0:
+            # Seeing less should mean trusting fewer channels.
             clean_eff = participation_ratio(clean_mask)
             ret["avm_occ_rank_loss"] = self.avm_occ_rank_weight * F.relu(
                 occ_eff - clean_eff + self.avm_occ_rank_margin
             ).mean()
+        if self.avm_occ_vis_weight > 0:
+            # Batch 7, identity-free visibility target (our design; guide 6.1(3)
+            # asks for controlled partial observations, DPM/DPM++ only reuse
+            # their ID losses on occluded samples). The channels the band
+            # changed the most carry the erased content, so the mask should
+            # drop where the aerial feature changed: corr(clean - occluded
+            # mask, |a_clean - a_occ|) -> 1. No pid is used, and correlation
+            # ignores the amplitude, so it does not push the mask to select
+            # harder. Logged as 1 - corr, which stays >= 0 for the log filter.
+            with torch.no_grad():
+                change = (F.normalize(aerial_in.detach().float(), dim=-1)
+                          - F.normalize(occ_cls, dim=-1)).abs()
+            corr = soft_row_correlation(clean_mask - occ_mask, change)
+            ret["avm_occ_vis_loss"] = self.avm_occ_vis_weight * (1.0 - corr).mean()
 
     def _uses_hidden_states(self):
         return (
@@ -298,7 +337,7 @@ class IRRA(nn.Module):
         """Named [N_text, N_aerial] score matrices used by the evaluator."""
         if self.avm_mode != "dpm":
             raise RuntimeError("retrieval_scores is only defined for avm_mode=dpm")
-        return dpm_retrieval_scores(qfeats, gfeats, self.embed_dim)
+        return dpm_retrieval_scores(qfeats, gfeats, self.embed_dim, permute=self.avm_eval_perm)
 
     
     def cross_former(self, q, k, v):
@@ -465,7 +504,10 @@ class IRRA(nn.Module):
                 # Batch 5: the more channels the mask dropped, the worse the
                 # masked score (eff 0.87 -> -0.7, 0.55 -> -3.8, 0.35 -> -6.8).
                 # A hinge floor on the participation ratio caps how selective
-                # the mask may become, like DPM++'s budget loss.
+                # the mask may become. Our addition: DPM/DPM++ put no budget on
+                # the prototype mask (the DPM++ budget loss, Eq. 22, is on SPT
+                # patch selection), and a mean budget would be meaningless here
+                # because re-normalisation cancels the mask scale.
                 ret["avm_eff_floor_loss"] = self.avm_eff_floor_weight * F.relu(
                     self.avm_eff_floor - participation_ratio(avm_mask)
                 ).mean()

@@ -15,7 +15,7 @@ from processor.processor_finetune import do_train
 from utils.checkpoint import Checkpointer
 from utils.iotools import save_train_configs
 from utils.logger import setup_logger
-from solver import build_optimizer, build_lr_scheduler
+from solver import build_optimizer, build_mask_optimizer, build_lr_scheduler
 from model import build_model
 from utils.metrics import Evaluator
 from utils.options import get_args
@@ -92,6 +92,12 @@ if __name__ == '__main__':
         )
     optimizer = build_optimizer(args, model)
     scheduler = build_lr_scheduler(args, optimizer)
+    mask_optimizer = mask_scheduler = None
+    if getattr(args, "avm_two_step", False):
+        # DPM two-step update: the mask generator is stepped on its own,
+        # after the rest of the model, with the same warmup + cosine schedule.
+        mask_optimizer = build_mask_optimizer(args, model)
+        mask_scheduler = build_lr_scheduler(args, mask_optimizer)
 
     is_master = get_rank() == 0
     checkpointer = Checkpointer(model, optimizer, scheduler, args.output_dir, is_master)
@@ -103,4 +109,5 @@ if __name__ == '__main__':
         start_epoch = checkpoint['epoch']
 
 
-    do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer, trainset)
+    do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer, trainset,
+             mask_optimizer=mask_optimizer, mask_scheduler=mask_scheduler)

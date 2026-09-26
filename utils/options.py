@@ -160,6 +160,35 @@ def get_args():
         default=1.0,
         help="dpm: weight of the participation-ratio floor hinge",
     )
+    # Batch 7.
+    parser.add_argument(
+        "--avm_mask_groups",
+        type=int,
+        default=0,
+        help="dpm: share one mask gate across each of G contiguous channel "
+             "groups (0 = one gate per channel)",
+    )
+    parser.add_argument(
+        "--avm_occ_vis_weight",
+        type=float,
+        default=0.0,
+        help="dpm: weight of the pid-free visibility target on the occluded "
+             "copy, 1 - corr(clean - occluded mask, feature change)",
+    )
+    parser.add_argument(
+        "--avm_eval_perm",
+        default=False,
+        action='store_true',
+        help="dpm: also evaluate with every gallery mask moved to another "
+             "image (masked_perm / sum_perm rows)",
+    )
+    parser.add_argument(
+        "--avm_two_step",
+        default=False,
+        action='store_true',
+        help="dpm: DPM two-step update, the mask generator gets its own "
+             "optimizer and is stepped after the rest of the model",
+    )
     parser.add_argument(
         "--avm_loss_weight",
         type=float,

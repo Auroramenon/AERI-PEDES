@@ -3,13 +3,22 @@ import torch
 from .lr_scheduler import LRSchedulerWithWarmup
 
 
+def is_mask_generator_param(key):
+    """Parameters of the dpm mask generator (CLS mask head or HMG)."""
+    return "avm_mask_head" in key
+
+
 def build_optimizer(args, model):
     params = []
+    two_step = getattr(args, "avm_two_step", False)
 
     print(f'Using {args.lr_factor} times learning rate for random init module ')
     
     for key, value in model.named_parameters():
         if not value.requires_grad:
+            continue
+        if two_step and is_mask_generator_param(key):
+            # DPM two-step update: the mask generator has its own optimizer.
             continue
         lr = args.lr
         weight_decay = args.weight_decay
@@ -38,6 +47,28 @@ def build_optimizer(args, model):
 
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
 
+    return _make_optimizer(args, params)
+
+
+def build_mask_optimizer(args, model):
+    """Optimizer for the mask generator alone (--avm_two_step).
+
+    DPM (paper, implementation details) and DPM++ (make_optimizer_2stage's
+    Moptimizer, processor_clipreid_stage3.py) update the mask generator in a
+    second step of every iteration. The optimizer type and avm_lr are kept
+    from the one-step runs so that only the update scheme changes.
+    """
+    params = [
+        {"params": [value], "lr": args.avm_lr, "weight_decay": args.weight_decay}
+        for key, value in model.named_parameters()
+        if value.requires_grad and is_mask_generator_param(key)
+    ]
+    if not params:
+        raise ValueError("avm_two_step needs a trainable mask generator")
+    return _make_optimizer(args, params)
+
+
+def _make_optimizer(args, params):
     if args.optimizer == "SGD":
         optimizer = torch.optim.SGD(
             params, lr=args.lr, momentum=args.momentum

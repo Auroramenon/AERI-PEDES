@@ -12,8 +12,30 @@ from torch.utils.tensorboard import SummaryWriter
 from prettytable import PrettyTable
 import torch.nn.functional as F
 
+def forward_losses(model, batch):
+    """One forward pass: per-key means and the total of every '*loss*' term."""
+    ret = model(batch)
+    ret = {key: values.mean() for key, values in ret.items()}
+    return ret, sum([v for k, v in ret.items() if "loss" in k])
+
+
+def mask_generator_step(model, batch, mask_optimizer):
+    """Second half of DPM's two-step update (--avm_two_step).
+
+    DPM (paper, implementation details) and DPM++ (processor_clipreid_stage3.py)
+    first update everything except the mask generator, then run the forward
+    pass again with the updated backbone and step only the mask generator.
+    The other parameters also receive gradients here; the next iteration's
+    optimizer.zero_grad() discards them, as in the DPM++ code.
+    """
+    mask_optimizer.zero_grad()
+    _, loss = forward_losses(model, batch)
+    loss.backward()
+    mask_optimizer.step()
+
+
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
-             scheduler, checkpointer, trainset):
+             scheduler, checkpointer, trainset, mask_optimizer=None, mask_scheduler=None):
 
     log_period = args.log_period
     eval_period = args.eval_period
@@ -44,6 +66,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         "avm_occ_rank_loss": AverageMeter(),
         "avm_occ_eff": AverageMeter(),
         "avm_eff_floor_loss": AverageMeter(),
+        "avm_occ_vis_loss": AverageMeter(),
         "entropy_loss": AverageMeter(),
         "fa_triplet_loss": AverageMeter(),
         "itc_loss": AverageMeter(),
@@ -68,9 +91,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         for n_iter, batch in enumerate(train_loader):
             batch = {k: v.cuda() for k, v in batch.items()}
            
-            ret = model(batch)
-            ret = {key: values.mean() for key, values in ret.items()}
-            total_loss = sum([v for k, v in ret.items() if "loss" in k])
+            ret, total_loss = forward_losses(model, batch)
 
             batch_size = batch['images'].shape[0]
             
@@ -86,11 +107,13 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             )
             for key in ('avm_mask_inst_std', 'avm_mask_eff', 'avm_id_loss',
                         'avm_mid_loss', 'avm_occ_loss', 'avm_occ_rank_loss',
-                        'avm_occ_eff', 'avm_eff_floor_loss'):
+                        'avm_occ_eff', 'avm_eff_floor_loss', 'avm_occ_vis_loss'):
                 meters[key].update(ret.get(key, 0), batch_size)
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+            if mask_optimizer is not None:
+                mask_generator_step(model, batch, mask_optimizer)
             synchronize()
 
             if (n_iter + 1) % log_period == 0:
@@ -110,6 +133,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
 
 
         scheduler.step()
+        if mask_scheduler is not None:
+            mask_scheduler.step()
         if get_rank() == 0:
             end_time = time.time()
             time_per_batch = (end_time - start_time) / 60

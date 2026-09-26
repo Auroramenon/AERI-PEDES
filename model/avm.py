@@ -5,20 +5,44 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def check_mask_groups(out_dim, groups):
+    """groups = 0 keeps one gate per channel; otherwise G gates must tile out_dim."""
+    if groups and (not 1 < groups < out_dim or out_dim % groups):
+        raise ValueError(
+            f"mask groups must divide {out_dim} and lie in (1, {out_dim}); got {groups}"
+        )
+
+
+def expand_groups(group_mask, out_dim):
+    """Repeat each of G group gates over out_dim // G contiguous channels.
+
+    Batch 7: a mask with 512 free gates can carve a training-ID subspace
+    (batches 5/6); G shared gates limit that freedom. CLIP channels have no
+    order, so contiguous groups are an arbitrary partition, not semantics
+    (advisor guide 3.2 / 4.1). The participation ratio of the expanded mask
+    equals that of the G gates, so the eff floor keeps its meaning.
+    """
+    check_mask_groups(out_dim, group_mask.shape[-1])
+    return group_mask.repeat_interleave(out_dim // group_mask.shape[-1], dim=-1)
+
+
 class FeatureMaskHead(nn.Module):
     """Predict an aerial-instance-conditioned feature mask."""
 
-    def __init__(self, embed_dim, hidden_dim=None):
+    def __init__(self, embed_dim, hidden_dim=None, groups=0):
         super().__init__()
 
         if hidden_dim is None:
             hidden_dim = embed_dim * 2
+        check_mask_groups(embed_dim, groups)
+        self.embed_dim = embed_dim
+        self.groups = groups
 
         self.mlp = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, embed_dim),
+            nn.Linear(hidden_dim, groups or embed_dim),
         )
 
         # Initial mask = sigmoid(0) = 0.5.
@@ -28,7 +52,10 @@ class FeatureMaskHead(nn.Module):
         nn.init.zeros_(self.mlp[-1].bias)
 
     def forward(self, aerial_cls):
-        return torch.sigmoid(self.mlp(aerial_cls))
+        mask = torch.sigmoid(self.mlp(aerial_cls))
+        if self.groups:
+            mask = expand_groups(mask, self.embed_dim)
+        return mask
 
 
 def feature_gallery_embedding(aerial_cls, mask, eps=1e-6):
@@ -84,8 +111,24 @@ def plain_cosine_scores(text_feats, aerial_feats, eps=1e-6):
     return text_unit @ aerial_unit.t()
 
 
-def dpm_retrieval_scores(text_feats, gallery_feats, embed_dim):
-    """Score text queries against gallery rows packed as [aerial | mask]."""
+def fixed_derangement(n, seed=0, device=None):
+    """A fixed permutation with no fixed point: index order[k] maps to order[k + 1]."""
+    if n < 2:
+        raise ValueError("a derangement needs at least two items")
+    order = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
+    source = torch.empty_like(order)
+    source[order] = order.roll(-1)
+    return source.to(device)
+
+
+def dpm_retrieval_scores(text_feats, gallery_feats, embed_dim, permute=False):
+    """Score text queries against gallery rows packed as [aerial | mask].
+
+    permute=True adds the random-mask control of the advisor guide (9.1)
+    inside the same model: every gallery image is scored with another
+    image's mask ("masked_perm", "sum_perm"). The mask distribution is
+    unchanged; only the image-to-mask assignment is broken.
+    """
     if gallery_feats.shape[-1] != 2 * embed_dim:
         raise ValueError(
             "DPM gallery features must be [aerial, mask] with width "
@@ -95,7 +138,13 @@ def dpm_retrieval_scores(text_feats, gallery_feats, embed_dim):
 
     plain = plain_cosine_scores(text_feats, aerial)
     masked = text_side_masked_scores(text_feats, aerial, mask)
-    return {"plain": plain, "masked": masked, "sum": plain + masked}
+    scores = {"plain": plain, "masked": masked, "sum": plain + masked}
+    if permute:
+        shuffled = mask[fixed_derangement(mask.shape[0], device=mask.device)]
+        masked_perm = text_side_masked_scores(text_feats, aerial, shuffled)
+        scores["masked_perm"] = masked_perm
+        scores["sum_perm"] = plain + masked_perm
+    return scores
 
 
 def participation_ratio(mask):
@@ -143,6 +192,21 @@ def occlude_band(images, ratio):
     shape = [images.shape[0]] + [1] * (images.ndim - 1)
     shape[-2] = length
     return images * (~blank).reshape(shape).to(images.dtype)
+
+
+def soft_row_correlation(x, target, eps=1e-4):
+    """Per-row correlation of x with target, damped while x is nearly flat.
+
+    target is standardised exactly. eps is added to the variance of x, so
+    the value is Pearson's r once x spreads well beyond sqrt(eps) and goes
+    to 0 with a finite gradient as x becomes constant. Batch 7 needs this
+    because the clean and occluded masks both start at exactly 0.5, where
+    the plain Pearson r is 0/0.
+    """
+    x = x - x.mean(dim=1, keepdim=True)
+    target = target - target.mean(dim=1, keepdim=True)
+    target = target / target.pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-12)
+    return (x * target).mean(dim=1) / (x.pow(2).mean(dim=1) + eps).sqrt()
 
 
 # ---------------------------------------------------------------------------
@@ -220,13 +284,18 @@ class HierarchicalMaskGenerator(nn.Module):
 
     The only change is the patch grid: DPM++ assumes a 2:1 grid, CFAN uses
     384x128 inputs with stride 16, i.e. a 24x8 grid, passed in as grid_hw.
+    groups > 0 (batch 7, not in DPM++) predicts G shared gates instead of
+    out_dim, see expand_groups.
     """
 
     LAYERS = (1, 3, 9, 11)
 
-    def __init__(self, width, out_dim, grid_hw):
+    def __init__(self, width, out_dim, grid_hw, groups=0):
         super().__init__()
+        check_mask_groups(out_dim, groups)
         self.grid_hw = tuple(grid_hw)
+        self.out_dim = out_dim
+        self.groups = groups
         levels = len(self.LAYERS)
 
         self.conv = nn.Sequential(
@@ -237,7 +306,7 @@ class HierarchicalMaskGenerator(nn.Module):
             conv3x3_block(width, width),
             nn.AdaptiveMaxPool2d((1, 1)),
         )
-        self.fc = nn.Linear(width, out_dim)
+        self.fc = nn.Linear(width, groups or out_dim)
         nn.init.zeros_(self.fc.weight)
         nn.init.zeros_(self.fc.bias)
 
@@ -258,4 +327,7 @@ class HierarchicalMaskGenerator(nn.Module):
                 )
             )
         pooled = self.conv(torch.cat(maps, dim=1)).flatten(1)
-        return torch.sigmoid(self.fc(pooled))
+        mask = torch.sigmoid(self.fc(pooled))
+        if self.groups:
+            mask = expand_groups(mask, self.out_dim)
+        return mask
